@@ -1,3 +1,4 @@
+use fft_sound_convolution::{StereoFFTConvolution, StereoFilter};
 use nds_sound_render::*;
 
 use std::{path::{Path}, sync::mpsc};
@@ -79,9 +80,9 @@ struct Cli {
     /// If a path to an impulse response is given, IR convolution is performed and a separate reverb channel is created and mixed.
     #[arg(long)]
     ir: Option<PathBuf>,
-    /// Master channel gain
+    /// Out channel gain
     #[arg(long)]
-    mastergain: Option<f32>,
+    outgain: Option<f32>,
     /// IR channel gain
     #[arg(long)]
     irgain: Option<f32>,
@@ -152,10 +153,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // interp
     // repeat
     // play
+    // ir
+    // outgain
+    // irgain
 
     for (input_file_path, output_file_path) in input_file_paths {
         print!("Rendering {}... ", input_file_path.display());
-        render(&cli.sf2, input_file_path, output_file_path, cli.buffer_size, cli.channels as fluid_int, cli.bitdepth, cli.sample_rate, cli.interp.clone(), cli.repeat, cli.play)?;
+        render(&cli.sf2, input_file_path, output_file_path, cli.buffer_size, cli.channels as fluid_int, cli.bitdepth, cli.sample_rate, cli.interp.clone(), cli.repeat, cli.play, cli.ir.clone(), cli.outgain, cli.irgain)?;
         println!("done!");
     }
 
@@ -164,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn render<P: AsRef<Path>>(sound_font: &PathBuf, input_file_path: P, output_file_path: P, buffer_size: usize, channels: fluid_int, bitdepth: u8, sample_rate: u32, interp: Interp, repeat: fluid_int, play: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn render<P: AsRef<Path>>(sound_font: &PathBuf, input_file_path: P, output_file_path: P, buffer_size: usize, channels: fluid_int, bitdepth: u8, sample_rate: u32, interp: Interp, repeat: fluid_int, play: bool, irpath: Option<PathBuf>, outgain: Option<f32>, irgain: Option<f32>) -> Result<(), Box<dyn std::error::Error>> {
     let settings = FluidSettings::new();
 
     unsafe {
@@ -226,6 +230,24 @@ pub fn render<P: AsRef<Path>>(sound_font: &PathBuf, input_file_path: P, output_f
         CHUNK(Vec<f32>),
         DONE
     }
+    // - Initialize IR
+    let mut ir_left = vec![1.0_f64];
+    let mut ir_right = vec![1.0_f64];
+    if let Some(irpath) = &irpath {
+        let mut reader = hound::WavReader::open(irpath)?;
+        ir_left = vec![1.0_f64; reader.len() as usize / 2];
+        ir_right = vec![1.0_f64; reader.len() as usize / 2];
+        for (i, sample) in reader.samples::<f32>().into_iter().enumerate() {
+            if i % 2 == 0 {
+                ir_left[i / 2] = sample? as f64;
+            } else {
+                ir_right[i / 2] = sample? as f64;
+            }
+        }
+    }
+    let mut stereo_fft_convolution = StereoFFTConvolution::new(ir_left, ir_right, 512);
+    let mut stereo_fft_convolution_residual_samples = (stereo_fft_convolution.internal_buffer_size() - 512) as isize;
+    // Continue to setup the audio output.
     let _device = run_output_device(
         params,
         move |data| {
@@ -249,7 +271,7 @@ pub fn render<P: AsRef<Path>>(sound_font: &PathBuf, input_file_path: P, output_f
     
     let mut out = Mixer::new(synth.count_audio_channels().try_into()?); out.init_len(buffer_size);
     let mut fx = Mixer::new((synth.count_effects_channels() * synth.count_effects_groups()).try_into()?); fx.init_len(buffer_size);
-    
+
     loop {
         out.zero();
         fx.zero();
@@ -258,7 +280,18 @@ pub fn render<P: AsRef<Path>>(sound_font: &PathBuf, input_file_path: P, output_f
         let master = out.mix();
         let [left, right] = master.audio_buffers();
 
-        let master_samples: Vec<f32> = left.iter().zip(right.iter()).flat_map(|(&l, &r)| [l, r])
+        let master_samples: Vec<f32> = left.iter().zip(right.iter()).map(|(&l, &r)| [l, r])
+            .map(|[l, r]| {
+                if irpath.is_some() {
+                    // Do convolution
+                    let (convl, convr) = stereo_fft_convolution.compute((l as f64, r as f64));
+                    let (convl, convr) = (convl as f32, convr as f32);
+                    [l * outgain.unwrap_or(1.0) + convl * irgain.unwrap_or(1.0), r * outgain.unwrap_or(1.0) + convr * irgain.unwrap_or(1.0)]
+                } else {
+                    [l, r]
+                }
+            })
+            .flatten()
             .map(|x| quantize_to_bitdepth(x, bitdepth)) // Quantization
             .collect();
         for sample in &master_samples {
@@ -270,10 +303,13 @@ pub fn render<P: AsRef<Path>>(sound_font: &PathBuf, input_file_path: P, output_f
 
         unsafe {
             if fluid_player_get_status(player.get()) == fluid_player_status_FLUID_PLAYER_DONE {
-                if play {
-                    tx.send(OutputAudio::DONE)?;
+                if stereo_fft_convolution_residual_samples <= 0 {
+                    if play {
+                        tx.send(OutputAudio::DONE)?;
+                    }
+                    break;
                 }
-                break;
+                stereo_fft_convolution_residual_samples -= buffer_size as isize;
             }
         }
     }

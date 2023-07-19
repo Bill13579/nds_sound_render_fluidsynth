@@ -182,6 +182,9 @@ impl Channel {
     pub fn new() -> Channel {
         Channel { buf: Vec::new() }
     }
+    pub fn from_buf(buf: Vec<f32>) -> Channel {
+        Channel { buf }
+    }
     pub fn len(&self) -> usize {
         self.buf.len()
     }
@@ -222,6 +225,9 @@ impl StereoChannel {
     pub fn new() -> StereoChannel {
         StereoChannel { l: Channel::new(), r: Channel::new() }
     }
+    pub fn from_bufs(bufl: Vec<f32>, bufr: Vec<f32>) -> StereoChannel {
+        StereoChannel { l: Channel::from_buf(bufl), r: Channel::from_buf(bufr) }
+    }
     pub fn len(&self) -> usize {
         self.l.len()  // self.r should return the same thing
     }
@@ -239,13 +245,13 @@ impl StereoChannel {
     pub fn audio_buffers_mut(&mut self) -> [&mut [f32]; 2] {
         [self.l.audio_buffer_mut(), self.r.audio_buffer_mut()]
     }
-    pub fn add(&mut self, other: &StereoChannel) {
+    pub fn add(&mut self, other: &StereoChannel, gain: Option<f32>) {
         let [ol, or] = other.audio_buffers();
         let [sl, sr] = self.audio_buffers_mut();
         for (i, (&lval, &rval)) in ol.iter().zip(or.iter()).enumerate() {
             if let Some(selfval) = sl.get_mut(i) {
-                *selfval += lval;
-                sr[i] += rval;
+                *selfval += lval * gain.unwrap_or(1.0);
+                sr[i] += rval * gain.unwrap_or(1.0);
             } else {
                 break;
             }
@@ -288,7 +294,7 @@ impl Mixer {
         if let Some(len) = self.len() {
             master.init(len);
             for channel in &self.channels {
-                master.add(channel);
+                master.add(channel, None);
             }
         }
         master

@@ -10,7 +10,7 @@ clap = { version = "4.3.10", features = ["derive"] }
 glob = "0.3.1"
 hound = "3.5.0"
 tinyaudio = "0.1.1"
-fft_sound_convolution = { path = "../fft_sound_convolution" }
+fft_sound_convolution = "0.1.0"
 
 [build-dependencies]
 bindgen = "0.66.1"
