@@ -1,7 +1,6 @@
 SoundFont Management (Generators, Loaders, Modulators, Voice Manipulation)
 Modulator Management
 Voice Control
-MIDI Sequencer
+MIDI Sequencer => Sequencer Events
 MIDI Drivers
-MIDI Events
 MIDI Router

@@ -2,11 +2,17 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{ptr::NonNull, ffi::CString};
+use std::{ptr::NonNull, ffi::{CString, c_void}, collections::HashMap, sync::Arc};
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 /// Macro to quickly convert any strings and string-likes into an owned CString and then to a C-style string pointer
+///
+/// Note
+/// ====
+/// THE STRING IS DROPPED WHEN THE CURRENT SCOPE ENDS.
+/// Memory management of a string created in this way is done by Rust. Only use if you are sure that the pointer will not
+///  be used again beyond the current scope.
 #[macro_export]
 macro_rules! fluid_str {
     ($l:ident) => {
@@ -100,10 +106,17 @@ impl Drop for FluidSettings {
 ///  simply automatically calls `delete_fluid_synth`
 ///  upon being dropped. Usage of the internal `synth`
 ///  object thus still requires unsafe code from fluid.
+/// 
+/// Note
+/// ====
+/// `Send` and `Sync` are implemented on `FluidSynth`, and so the `synth.threadsafe-api`
+///  setting **must** be set to `1 (TRUE)` in order to avoid data races.
 pub struct FluidSynth<'a> {
     _settings: &'a FluidSettings,
     synth: *mut fluid_synth_t
 }
+unsafe impl<'a> Send for FluidSynth<'a> {  }
+unsafe impl<'a> Sync for FluidSynth<'a> {  }
 // impl<'a> FluidSynth<'a> {
 //     pub fn sfload(&self, filename: &str, reset_presets: bool) -> Result<(), Box<dyn std::error::Error>> {
 //         let filename = fluid_str!(filename);
@@ -332,6 +345,87 @@ impl<'a> Drop for FluidPlayer<'a> {
     fn drop(&mut self) {
         unsafe {
             delete_fluid_player(self.get());
+        }
+    }
+}
+
+/// An *unsafe* wrapper of `fluid_midi_event_t` that
+///  simply automatically calls `delete_fluid_midi_event`
+///  upon being dropped. Usage of the internal `midi_event`
+///  object thus still requires unsafe code from fluid.
+pub struct FluidMIDIEvent {
+    midi_event: *mut fluid_midi_event_t
+}
+impl FluidMIDIEvent {
+    pub fn new() -> Option<FluidMIDIEvent> {
+        Some(FluidMIDIEvent {
+            midi_event: unsafe {
+                NonNull::new(new_fluid_midi_event()).map(|nonnull| nonnull.as_ptr())?
+            }
+        })
+    }
+    pub fn get(&self) -> *mut fluid_midi_event_t {
+        self.midi_event
+    }
+}
+impl Drop for FluidMIDIEvent {
+    fn drop(&mut self) {
+        unsafe {
+            delete_fluid_midi_event(self.get());
+        }
+    }
+}
+
+/// An *unsafe* wrapper of `fluid_sequencer_t` that
+///  simply automatically calls `delete_fluid_sequencer`
+///  upon being dropped. Usage of the internal `sequencer`
+///  object thus still requires unsafe code from fluid.
+pub struct FluidSequencer<'a> {
+    clients: HashMap<fluid_seq_id_t, Arc<dyn Send + Sync + 'a>>,
+    sequencer: *mut fluid_sequencer_t
+}
+impl<'a> FluidSequencer<'a> {
+    pub fn new() -> Option<FluidSequencer<'a>> {
+        Some(FluidSequencer {
+            clients: HashMap::new(),
+            sequencer: unsafe {
+                NonNull::new(new_fluid_sequencer2(false as fluid_int)).map(|nonnull| nonnull.as_ptr())?
+            }
+        })
+    }
+    pub fn get(&self) -> *mut fluid_sequencer_t {
+        self.sequencer
+    }
+
+    pub fn add_midi_event_to_buffer(&self, event: &FluidMIDIEvent) -> Result<(), FluidError> {
+        unsafe {
+            fluid_sequencer_add_midi_event_to_buffer(self.get() as *mut c_void, event.get())
+        }.fluid_result("failed to add MIDI event to buffer")
+    }
+    pub fn register_fluidsynth(&mut self, synth: Arc<FluidSynth<'a>>) -> fluid_seq_id_t {
+        let seq_id;
+        unsafe {
+            seq_id = fluid_sequencer_register_fluidsynth(self.get(), synth.get());
+        }
+        self.clients.insert(seq_id, synth);
+        seq_id
+    }
+    pub fn unregister_client(&mut self, seq_id: fluid_seq_id_t) -> Option<Arc<dyn Send + Sync + 'a>> {
+        unsafe {
+            fluid_sequencer_unregister_client(self.get(), seq_id);
+        }
+        self.clients.remove(&seq_id)
+    }
+}
+impl<'a> Drop for FluidSequencer<'a> {
+    fn drop(&mut self) {
+        for &seq_id in self.clients.keys() {
+            unsafe {
+                fluid_sequencer_unregister_client(self.get(), seq_id);
+            }
+        }
+        unsafe {
+            delete_fluid_sequencer(self.get());
         }
     }
 }
