@@ -2,7 +2,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{ptr::NonNull};
+use std::{ptr::NonNull, ffi::CString};
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
@@ -335,4 +335,7 @@ impl<'a> Drop for FluidPlayer<'a> {
         }
     }
 }
+
+pub mod math;
+// pub mod play;
 
