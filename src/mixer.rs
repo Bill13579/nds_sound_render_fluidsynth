@@ -40,6 +40,14 @@ impl Channel {
             Ok(())
         }
     }
+    pub fn drain(&mut self, len: usize) -> Vec<f32> {
+        let drained = self.buf.drain(..len);
+        self.buf.fill_back(0.0);
+        drained
+    }
+    pub fn drain_to_channel(&mut self, len: usize) -> Channel {
+        Self::from_buf(RingBuffer::from(self.drain(len)))
+    }
     pub fn init(&mut self, len: usize) {
         self.buf.to_capacity_back(Some(len));
         self.buf.initialize_again(0.0);
@@ -76,6 +84,9 @@ impl StereoChannel {
     pub fn new() -> StereoChannel {
         StereoChannel { l: Channel::new(), r: Channel::new() }
     }
+    pub fn from_channels(l: Channel, r: Channel) -> StereoChannel {
+        StereoChannel { l, r }
+    }
     pub fn from_bufs(bufl: RingBuffer<f32>, bufr: RingBuffer<f32>) -> StereoChannel {
         StereoChannel { l: Channel::from_buf(bufl), r: Channel::from_buf(bufr) }
     }
@@ -90,6 +101,9 @@ impl StereoChannel {
         self.l.expand(new_len)?;
         self.r.expand(new_len)?;
         Ok(())
+    }
+    pub fn drain(&mut self, len: usize) -> StereoChannel {
+        StereoChannel::from_channels(self.l.drain_to_channel(len), self.r.drain_to_channel(len))
     }
     pub fn init(&mut self, len: usize) {
         self.l.init(len);
@@ -128,6 +142,13 @@ impl RawMixerData {
     pub fn new(num_out_channels: usize) -> RawMixerData {
         RawMixerData { channels: (0..num_out_channels).map(|_| StereoChannel::new()).collect() }
     }
+    pub fn from_channels(channels: Vec<StereoChannel>) -> Result<RawMixerData, MixerError> {
+        if !channels.is_empty() && !channels.iter().all(|x| x.len() == channels[0].len()) {
+            Err(MixerError::new("Failed to create `RawMixerData` from the provided channels! Not all channels have the same internal buffer length!"))
+        } else {
+            Ok(RawMixerData { channels })
+        }
+    }
     pub fn len(&self) -> Option<usize> {
         Some(self.channels.get(0)?.len())  // All the channels should return the same buffer length
     }
@@ -137,6 +158,9 @@ impl RawMixerData {
     pub fn expand(&mut self, new_len: usize) -> Result<(), MixerError> {
         for channel in &mut self.channels { channel.expand(new_len)?; }
         Ok(())
+    }
+    pub fn drain(&mut self, len: usize) -> Result<RawMixerData, MixerError> {
+        Self::from_channels(self.channels.iter_mut().map(|x| x.drain(len)).collect())
     }
     pub fn num_channels(&self) -> usize {
         self.channels.len()
@@ -213,10 +237,20 @@ impl Mixer {
             }
         }
     }
-    pub fn drain(&mut self) {
-        let mut drain_buffer = RawMixerData::new(self.num_out_channels);
-        drain_buffer.init_len(self.drain_len);
-        self.add(&drain_buffer);
+    pub fn add_and_drain(&mut self, chunk: &RawMixerData) -> Result<RawMixerData, MixerError> {
+        self.add(chunk);
+        let num_samples = chunk.len().ok_or(MixerError::new("Could not obtain length of chunk! Chunk does not contain any channels."))?;
+        self.internal_buffer.drain(num_samples)
+    }
+    pub fn render_late_fx(&mut self) {
+        let mut empty_buffer = RawMixerData::new(self.num_out_channels);
+        empty_buffer.init_len(self.drain_len);
+        self.add(&empty_buffer);
+    }
+    pub fn drain_fx(&mut self) -> Result<RawMixerData, MixerError> {
+        let mut empty_buffer = RawMixerData::new(self.num_out_channels);
+        empty_buffer.init_len(self.drain_len);
+        self.add_and_drain(&empty_buffer)
     }
     fn calculate_max_latency(fx: &Vec<Vec<Box<dyn StereoFX>>>) -> Option<usize> {
         fx.iter().map(|x| Self::calculate_fx_chain_latency(x.iter())).max()
