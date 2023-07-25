@@ -59,10 +59,19 @@ impl std::fmt::Display for MixerError {
 impl std::error::Error for MixerError {  }
 /// Trait defined for `fluid_int` as a quick way to convert `FLUID_OK`/`FLUID_FAILED` into Rust-style results
 pub trait FluidStatus {
+    fn fluid_result_ret(self, message: &str) -> Result<fluid_int, FluidError>;
     fn fluid_result(self, message: &str) -> Result<(), FluidError>;
     fn fluid_expect(self, message: &str);
 }
 impl FluidStatus for fluid_int {
+    /// Convert return value/`FLUID_FAILED` into a Rust-style `Result`
+    fn fluid_result_ret(self, message: &str) -> Result<fluid_int, FluidError> {
+        if self == FLUID_FAILED.try_into().expect("`interpret_fluid_status`, unexpected error") {
+            Err(FluidError::new(message))
+        } else {
+            Ok(self)
+        }
+    }
     /// Convert `FLUID_OK`/`FLUID_FAILED` into a Rust-style `Result`
     fn fluid_result(self, message: &str) -> Result<(), FluidError> {
         if self == FLUID_OK.try_into().expect("`interpret_fluid_status`, unexpected error 1") {
@@ -467,5 +476,5 @@ impl<'a> Drop for FluidSequencer<'a> {
 }
 
 pub mod math;
-// pub mod play;
+pub mod play;
 
