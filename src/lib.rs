@@ -83,9 +83,20 @@ impl FluidStatus for fluid_int {
 ///  simply automatically calls `delete_fluid_settings`
 ///  upon being dropped. Usage of the internal `settings`
 ///  object thus still requires unsafe code from fluid.
+/// 
+/// Note
+/// ====
+/// `Send` and `Sync` are implemented on `FluidSettings`, and so the `synth.threadsafe-api`
+///  setting **must** be set to `1 (TRUE)` in order to avoid data races.
+/// While the official documentation only states that the synth API's are thread-safe by design,
+///  due to the inclusion of thread-safe settings modification API's like `fluid_settings_copystr`,
+///  it should be ok to mark this as thread-safe.
+/// This and `FluidSynth` are the only two structs explicitly marked as thread-safe.
 pub struct FluidSettings {
     settings: *mut fluid_settings_t
 }
+unsafe impl Send for FluidSettings {  }
+unsafe impl Sync for FluidSettings {  }
 impl FluidSettings {
     pub fn new() -> FluidSettings {
         unsafe {
@@ -113,12 +124,12 @@ impl Drop for FluidSettings {
 /// ====
 /// `Send` and `Sync` are implemented on `FluidSynth`, and so the `synth.threadsafe-api`
 ///  setting **must** be set to `1 (TRUE)` in order to avoid data races.
-pub struct FluidSynth<'a> {
-    _settings: &'a FluidSettings,
+pub struct FluidSynth {
+    _settings: Arc<FluidSettings>,
     synth: *mut fluid_synth_t
 }
-unsafe impl<'a> Send for FluidSynth<'a> {  }
-unsafe impl<'a> Sync for FluidSynth<'a> {  }
+unsafe impl Send for FluidSynth {  }
+unsafe impl Sync for FluidSynth {  }
 // impl<'a> FluidSynth<'a> {
 //     pub fn sfload(&self, filename: &str, reset_presets: bool) -> Result<(), Box<dyn std::error::Error>> {
 //         let filename = fluid_str!(filename);
@@ -139,8 +150,8 @@ unsafe impl<'a> Sync for FluidSynth<'a> {  }
 //         }
 //     }
 // }
-impl<'a> FluidSynth<'a> {
-    pub fn new(settings: &'a FluidSettings) -> Option<FluidSynth> {
+impl FluidSynth {
+    pub fn new(settings: Arc<FluidSettings>) -> Option<FluidSynth> {
         unsafe {
             Some(
                 FluidSynth { _settings: settings, synth: NonNull::new(new_fluid_synth(settings.get())).map(|nonnull| nonnull.as_ptr())? }
@@ -182,7 +193,7 @@ impl<'a> FluidSynth<'a> {
         Ok(())
     }
 }
-impl<'a> Drop for FluidSynth<'a> {
+impl Drop for FluidSynth {
     fn drop(&mut self) {
         unsafe {
             delete_fluid_synth(self.get());
@@ -333,7 +344,7 @@ pub trait Stoppable {
 ///  upon being dropped. Usage of the internal `player`
 ///  object thus still requires unsafe code from fluid.
 pub struct FluidPlayer<'a> {
-    _synth: &'a FluidSynth<'a>,
+    _synth: &'a FluidSynth,
     player: *mut fluid_player_t
 }
 impl<'a> FluidPlayer<'a> {
@@ -422,7 +433,7 @@ impl<'a> FluidSequencer<'a> {
             fluid_sequencer_add_midi_event_to_buffer(self.get() as *mut c_void, event.get())
         }.fluid_result("Failed to add MIDI event to buffer")
     }
-    pub fn register_fluidsynth(&mut self, synth: Arc<FluidSynth<'a>>) -> fluid_seq_id_t {
+    pub fn register_fluidsynth(&mut self, synth: Arc<FluidSynth>) -> fluid_seq_id_t {
         let seq_id;
         unsafe {
             seq_id = fluid_sequencer_register_fluidsynth(self.get(), synth.get());
