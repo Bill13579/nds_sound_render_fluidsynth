@@ -2,7 +2,9 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{ptr::NonNull, ffi::{CString, c_void}, collections::HashMap, sync::Arc};
+use std::{ptr::NonNull, ffi::{CString, c_void}, sync::Arc};
+
+use indexmap::IndexMap;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
@@ -320,6 +322,12 @@ impl Mixer {
     }
 }
 
+/// Playback on synth can be stopped temporarily
+pub trait Stoppable {
+    fn stop(&mut self) -> Result<(), FluidError>;
+    fn play(&mut self) -> Result<(), FluidError>;
+}
+
 /// An *unsafe* wrapper of `fluid_player_t` that
 ///  simply automatically calls `delete_fluid_player`
 ///  upon being dropped. Usage of the internal `player`
@@ -338,6 +346,18 @@ impl<'a> FluidPlayer<'a> {
     }
     pub fn get(&self) -> *mut fluid_player_t {
         self.player
+    }
+}
+impl<'a> Stoppable for FluidPlayer<'a> {
+    fn stop(&mut self) -> Result<(), FluidError> {
+        unsafe {
+            fluid_player_stop(self.get())
+        }.fluid_result("Failed to stop the MIDI file player! (shouldn't happen https://www.fluidsynth.org/api/group__midi__player.html#gae630aa680bb891be30bffa3d6d5e1b21)")
+    }
+    fn play(&mut self) -> Result<(), FluidError> {
+        unsafe {
+            fluid_player_play(self.get())
+        }.fluid_result("Failed to start the MIDI file player!")
     }
 }
 impl<'a> Drop for FluidPlayer<'a> {
@@ -381,13 +401,13 @@ impl Drop for FluidMIDIEvent {
 ///  upon being dropped. Usage of the internal `sequencer`
 ///  object thus still requires unsafe code from fluid.
 pub struct FluidSequencer<'a> {
-    clients: HashMap<fluid_seq_id_t, Arc<dyn Send + Sync + 'a>>,
+    clients: IndexMap<fluid_seq_id_t, Arc<dyn Send + Sync + 'a>>,
     sequencer: *mut fluid_sequencer_t
 }
 impl<'a> FluidSequencer<'a> {
     pub fn new() -> Option<FluidSequencer<'a>> {
         Some(FluidSequencer {
-            clients: HashMap::new(),
+            clients: IndexMap::new(),
             sequencer: unsafe {
                 NonNull::new(new_fluid_sequencer2(false as fluid_int)).map(|nonnull| nonnull.as_ptr())?
             }
@@ -400,7 +420,7 @@ impl<'a> FluidSequencer<'a> {
     pub fn add_midi_event_to_buffer(&self, event: &FluidMIDIEvent) -> Result<(), FluidError> {
         unsafe {
             fluid_sequencer_add_midi_event_to_buffer(self.get() as *mut c_void, event.get())
-        }.fluid_result("failed to add MIDI event to buffer")
+        }.fluid_result("Failed to add MIDI event to buffer")
     }
     pub fn register_fluidsynth(&mut self, synth: Arc<FluidSynth<'a>>) -> fluid_seq_id_t {
         let seq_id;
@@ -410,11 +430,14 @@ impl<'a> FluidSequencer<'a> {
         self.clients.insert(seq_id, synth);
         seq_id
     }
-    pub fn unregister_client(&mut self, seq_id: fluid_seq_id_t) -> Option<Arc<dyn Send + Sync + 'a>> {
+    fn _unregister_client(&mut self, seq_id: fluid_seq_id_t) {
         unsafe {
             fluid_sequencer_unregister_client(self.get(), seq_id);
         }
-        self.clients.remove(&seq_id)
+    }
+    pub fn unregister_client(&mut self, seq_id: fluid_seq_id_t) -> Option<Arc<dyn Send + Sync + 'a>> {
+        self._unregister_client(seq_id);
+        self.clients.shift_remove(&seq_id)
     }
 }
 impl<'a> Drop for FluidSequencer<'a> {
