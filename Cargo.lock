@@ -285,13 +285,14 @@ dependencies = [
 
 [[package]]
 name = "fft_sound_convolution"
-version = "0.1.0"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da85d532baa64c6ae5198cac4c1150ca9093fbfd7621a1dee28223246d1cf240"
+checksum = "e8c1b37ffd85f33085b3c9253e4281ecb60d1556099fb1c7c68a4aea557447ef"
 dependencies = [
  "num-complex",
  "num-traits",
  "rustfft",
+ "slice-ring-buffer",
 ]
 
 [[package]]
@@ -393,6 +394,15 @@ name = "log"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b06a4cde4c0f271a446782e3eff8de789548ce57dbc8eca9292c27f4a42004b4"
+
+[[package]]
+name = "mach"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b823e83b2affd8f40a9ee8c29dbc56404c1e34cd2710921f2801e2cf29527afa"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "memchr"
@@ -580,6 +590,17 @@ name = "shlex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43b2853a4d09f215c24cc5489c992ce46052d359b5109343cbafbf26bc62f8a3"
+
+[[package]]
+name = "slice-ring-buffer"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc8eb449302fd7a6672a999c6846311a43865aaec54083948b911829a20d893"
+dependencies = [
+ "libc",
+ "mach",
+ "winapi",
+]
 
 [[package]]
 name = "strength_reduce"

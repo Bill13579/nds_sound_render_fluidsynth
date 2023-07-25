@@ -45,20 +45,6 @@ impl std::fmt::Display for FluidError {
     }
 }
 impl std::error::Error for FluidError {  }
-/// Generic Error to represent a variety of errors emitted by the mixer
-#[derive(Debug, Clone)]
-pub struct MixerError(String);
-impl MixerError {
-    pub fn new(message: &str) -> MixerError {
-        MixerError(String::from(message))
-    }
-}
-impl std::fmt::Display for MixerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", &self.0)
-    }
-}
-impl std::error::Error for MixerError {  }
 /// Trait defined for `fluid_int` as a quick way to convert `FLUID_OK`/`FLUID_FAILED` into Rust-style results
 pub trait FluidStatus {
     fn fluid_result_ret(self, message: &str) -> Result<fluid_int, FluidError>;
