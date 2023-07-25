@@ -69,20 +69,13 @@ impl SynthCore {
             fluid_synth_sfload(self.synth.get(), fluid_str!(sound_font.display().to_string()), true as fluid_int)
         }.fluid_result_ret("Failed to load SoundFont!")?)
     }
-    pub fn render(&self, buffer_size: usize) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let mut out = Mixer::new(self.synth.count_audio_channels().try_into()?); out.init_len(buffer_size);
-        let mut fx = Mixer::new((self.synth.count_effects_channels() * self.synth.count_effects_groups()).try_into()?); fx.init_len(buffer_size);
+    pub fn render(&self, buffer_size: usize) -> Result<mixer::RawMixerData, Box<dyn std::error::Error>> {
+        let mut out = mixer::RawMixerData::new(self.synth.count_audio_channels().try_into()?); out.init_len(buffer_size);
+        let mut fx = mixer::RawMixerData::new((self.synth.count_effects_channels() * self.synth.count_effects_groups()).try_into()?); fx.init_len(buffer_size);
 
         self.synth.process(&mut out, &mut fx)?;
-        let master = out.mix();
-        let [left, right] = master.audio_buffers();
 
-        let master_samples: Vec<f32> = left.iter().zip(right.iter()).map(|(&l, &r)| [l, r])
-            .flatten()
-            .map(|x| quantize_to_bitdepth(x, self.bitdepth)) // Quantization
-            .collect();
-
-        Ok(master_samples)
+        Ok(out)
     }
 }
 
@@ -122,6 +115,15 @@ impl SynthCore {
 //     )
 //     .unwrap();
 
+
+
+// let master = out.mix();
+// let [left, right] = master.audio_buffers();
+
+// let master_samples: Vec<f32> = left.iter().zip(right.iter()).map(|(&l, &r)| [l, r])
+//     .flatten()
+//     .map(|x| quantize_to_bitdepth(x, self.bitdepth)) // Quantization
+//     .collect();
 
 //     Ok(())
 // }
