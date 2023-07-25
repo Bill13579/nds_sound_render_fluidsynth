@@ -153,8 +153,9 @@ unsafe impl Sync for FluidSynth {  }
 impl FluidSynth {
     pub fn new(settings: Arc<FluidSettings>) -> Option<FluidSynth> {
         unsafe {
+            let synth = NonNull::new(new_fluid_synth(settings.get())).map(|nonnull| nonnull.as_ptr())?;
             Some(
-                FluidSynth { _settings: settings, synth: NonNull::new(new_fluid_synth(settings.get())).map(|nonnull| nonnull.as_ptr())? }
+                FluidSynth { _settings: settings, synth }
             )
         }
     }
@@ -343,15 +344,16 @@ pub trait Stoppable {
 ///  simply automatically calls `delete_fluid_player`
 ///  upon being dropped. Usage of the internal `player`
 ///  object thus still requires unsafe code from fluid.
-pub struct FluidPlayer<'a> {
-    _synth: &'a FluidSynth,
+pub struct FluidPlayer {
+    _synth: Arc<FluidSynth>,
     player: *mut fluid_player_t
 }
-impl<'a> FluidPlayer<'a> {
-    pub fn new(synth: &'a FluidSynth) -> Option<FluidPlayer<'a>> {
+impl FluidPlayer {
+    pub fn new(synth: Arc<FluidSynth>) -> Option<FluidPlayer> {
         unsafe {
+            let player = NonNull::new(new_fluid_player(synth.get())).map(|nonnull| nonnull.as_ptr())?;
             Some(
-                FluidPlayer { _synth: synth, player: NonNull::new(new_fluid_player(synth.get())).map(|nonnull| nonnull.as_ptr())? }
+                FluidPlayer { _synth: synth, player }
             )
         }
     }
@@ -359,7 +361,7 @@ impl<'a> FluidPlayer<'a> {
         self.player
     }
 }
-impl<'a> Stoppable for FluidPlayer<'a> {
+impl Stoppable for FluidPlayer {
     fn stop(&mut self) -> Result<(), FluidError> {
         unsafe {
             fluid_player_stop(self.get())
@@ -371,7 +373,7 @@ impl<'a> Stoppable for FluidPlayer<'a> {
         }.fluid_result("Failed to start the MIDI file player!")
     }
 }
-impl<'a> Drop for FluidPlayer<'a> {
+impl Drop for FluidPlayer {
     /// TODO:   WARNING FROM OFFICIAL FluidPlayer DOCS:  Do not call when the synthesizer associated to this player renders audio, i.e. an audio driver is running or any other synthesizer thread concurrently calls fluid_synth_process() or fluid_synth_nwrite_float() or fluid_synth_write_*() ! 
     fn drop(&mut self) {
         unsafe {
