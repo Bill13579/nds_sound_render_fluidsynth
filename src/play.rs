@@ -6,13 +6,112 @@ use tinyaudio::{OutputDeviceParameters, run_output_device};
 use crate::{*, math::quantize_to_bitdepth};
 use std::{path::{Path, PathBuf}, sync::mpsc};
 
-pub struct Player {
+// TODO
+pub struct AudioSystem {
 
+}
+
+pub struct SequencerSubsystem<'a> {
+    synthcore: Arc<SynthCore>,
+    sequencer: FluidSequencer<'a>
+}
+impl<'a> SequencerSubsystem<'a> {
+    pub fn new(synthcore: Arc<SynthCore>) -> Option<SequencerSubsystem<'a>> {
+        let mut sequencer = FluidSequencer::new()?;
+        sequencer.register_fluidsynth(synthcore.synth.clone()); //NOTE: Ignoring return value, which is the client ID, since it's stored inside `FluidSequencer` anyways and automatically freed
+        Some(SequencerSubsystem { synthcore, sequencer })
+    }
+    pub fn send(&self, midi_event: FluidMIDIEvent) -> Result<(), FluidError> {
+        self.sequencer.add_midi_event_to_buffer(&midi_event)
+    }
+    pub fn send_percussive_note(&self, chan: fluid_int, key: fluid_int, velocity: fluid_int) -> Result<(), FluidError> {
+        self.send_note_on(chan, key, velocity)?;
+        self.send_note_off(chan, key, velocity)?;
+        Ok(())
+    }
+    pub fn send_note_on(&self, chan: fluid_int, key: fluid_int, velocity: fluid_int) -> Result<(), FluidError> {
+        let on = FluidMIDIEvent::create_note_on_event(chan, key, velocity).ok_or(FluidError::new("Failed to create note on event!"))?;
+        self.send(on)?;
+        Ok(())
+    }
+    pub fn send_note_off(&self, chan: fluid_int, key: fluid_int, velocity: fluid_int) -> Result<(), FluidError> {
+        let off = FluidMIDIEvent::create_note_off_event(chan, key, velocity).ok_or(FluidError::new("Failed to create note off event!"))?;
+        self.send(off)?;
+        Ok(())
+    }
+    pub fn send_control_change(&self, chan: fluid_int, cc: fluid_int, value: fluid_int) -> Result<(), FluidError> {
+        let cc = FluidMIDIEvent::create_control_change_event(chan, cc, value).ok_or(FluidError::new("Failed to create control change event!"))?;
+        self.send(cc)?;
+        Ok(())
+    }
+    /// Sends a bank select control message on CC0
+    pub fn send_bank_select(&self, chan: fluid_int, bank: fluid_int) -> Result<(), FluidError> {
+        self.send_control_change(chan, 0, bank)?;
+        Ok(())
+    }
+    pub fn send_program_change(&self, chan: fluid_int, program: fluid_int) -> Result<(), FluidError> {
+        let pc = FluidMIDIEvent::create_program_change_event(chan, program).ok_or(FluidError::new("Failed to create program change event!"))?;
+        self.send(pc)?;
+        Ok(())
+    }
+    /// Sends a bank select message and a program change message at the same time to switch patches
+    pub fn send_patch_select(&self, chan: fluid_int, bank: fluid_int, program: fluid_int) -> Result<(), FluidError> {
+        self.send_bank_select(chan, bank)?;
+        self.send_program_change(chan, program)?;
+        Ok(())
+    }
+}
+
+pub struct FilePlayerSubsystem {
+    synthcore: Arc<SynthCore>,
+    player: FluidPlayer
+}
+#[repr(i32)]
+pub enum PlayerStatus {
+    Ready = fluid_player_status_FLUID_PLAYER_READY,
+    Playing = fluid_player_status_FLUID_PLAYER_PLAYING,
+    Stopping = fluid_player_status_FLUID_PLAYER_STOPPING,
+    Done = fluid_player_status_FLUID_PLAYER_DONE
+}
+impl FilePlayerSubsystem {
+    pub fn new(synthcore: Arc<SynthCore>) -> Option<FilePlayerSubsystem> {
+        let player = FluidPlayer::new(synthcore.synth.clone())?;
+        Some(FilePlayerSubsystem { synthcore, player })
+    }
+    pub fn set_loop(&self, play_loop: bool) -> Result<(), FluidError> {
+        unsafe {
+            fluid_player_set_loop(self.player.get(), play_loop as fluid_int).fluid_result("Failed to set loop!")
+        }
+    }
+    pub fn add<P: AsRef<Path>>(&self, midi_file_path: P) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            fluid_player_add(self.player.get(), fluid_str!(midi_file_path.as_ref().display().to_string())).fluid_result(&format!("Failed to load midi file \"{}\"!", midi_file_path.as_ref().display()))?;
+        }
+        Ok(())
+    }
+    pub fn play(&self) -> Result<(), FluidError> {
+        unsafe {
+            fluid_player_play(self.player.get()).fluid_result("Failed to start the MIDI player!")
+        }
+    }
+    pub fn get_status(&self) -> PlayerStatus {
+        let fluid_status;
+        unsafe {
+            fluid_status = fluid_player_get_status(self.player.get());
+        }
+        match fluid_status {
+            fluid_player_status_FLUID_PLAYER_READY => PlayerStatus::Ready,
+            fluid_player_status_FLUID_PLAYER_PLAYING => PlayerStatus::Playing,
+            fluid_player_status_FLUID_PLAYER_STOPPING => PlayerStatus::Stopping,
+            fluid_player_status_FLUID_PLAYER_DONE => PlayerStatus::Done,
+            _ => panic!("Unknown `fluid_player_status` value! Has the API changed?")
+        }
+    }
 }
 
 /// TODO: Removed creation of FluidPlayer from here
 /// TODO: Removed audio context creation
-/// TODO: Removed IR
+/// TODO: Removed IR -DONE
 /// TODO: Removed check for player status
 /// TODO: Need to implement everything commented out down below
 pub struct SynthCore {

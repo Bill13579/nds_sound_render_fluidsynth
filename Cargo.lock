@@ -285,9 +285,9 @@ dependencies = [
 
 [[package]]
 name = "fft_sound_convolution"
-version = "0.1.6"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "730b31e726011126b99092211b07126efe5bb5b56a1d33ab01505a3b382e5e61"
+checksum = "06c81f62ffd1f9188875fd36495f5d47b4bd258f4e27a3722620aed624d58f5a"
 dependencies = [
  "num-complex",
  "num-traits",

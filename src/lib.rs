@@ -251,8 +251,28 @@ impl Drop for FluidPlayer {
 ///  simply automatically calls `delete_fluid_midi_event`
 ///  upon being dropped. Usage of the internal `midi_event`
 ///  object thus still requires unsafe code from fluid.
+/// 
+/// Note
+/// ====
+/// |Event Type     |Contents                       |
+/// |:--------------|:------------------------------|
+/// |NOTEON		    |type, channel, key, velocity   |
+/// |NOTEOFF		|type, channel, key, velocity   |
+/// |CC CHANGE	    |type, channel, cc #, value     |
+/// |PRGM CHANGE	|type, channel, program         |
 pub struct FluidMIDIEvent {
     midi_event: *mut fluid_midi_event_t
+}
+#[repr(i32)]
+enum MIDIEventType {
+    VoiceNoteOff = 0x80,
+    VoiceNoteOn = 0x90,
+    VoiceAftertouch = 0xA0,
+    VoiceControlChange = 0xB0,
+    VoiceProgramChange = 0xC0,
+    VoiceChannelPressure = 0xD0,
+    VoicePitchBend = 0xE0,
+    SystemExclusive = 0xF0
 }
 impl FluidMIDIEvent {
     pub fn new() -> Option<FluidMIDIEvent> {
@@ -261,6 +281,45 @@ impl FluidMIDIEvent {
                 NonNull::new(new_fluid_midi_event()).map(|nonnull| nonnull.as_ptr())?
             }
         })
+    }
+    pub fn create_note_on_event(chan: fluid_int, key: fluid_int, velocity: fluid_int) -> Option<FluidMIDIEvent> {
+        unsafe {
+            let evt = FluidMIDIEvent::new()?;
+            fluid_midi_event_set_type(evt.get(), MIDIEventType::VoiceNoteOn as fluid_int);
+            fluid_midi_event_set_channel(evt.get(), chan);
+            fluid_midi_event_set_key(evt.get(), key);
+            fluid_midi_event_set_velocity(evt.get(), velocity);
+            Some(evt)
+        }
+    }
+    pub fn create_note_off_event(chan: fluid_int, key: fluid_int, velocity: fluid_int) -> Option<FluidMIDIEvent> {
+        unsafe {
+            let evt = FluidMIDIEvent::new()?;
+            fluid_midi_event_set_type(evt.get(), MIDIEventType::VoiceNoteOff as fluid_int);
+            fluid_midi_event_set_channel(evt.get(), chan);
+            fluid_midi_event_set_key(evt.get(), key);
+            fluid_midi_event_set_velocity(evt.get(), velocity);
+            Some(evt)
+        }
+    }
+    pub fn create_control_change_event(chan: fluid_int, cc: fluid_int, value: fluid_int) -> Option<FluidMIDIEvent> {
+        unsafe {
+            let evt = FluidMIDIEvent::new()?;
+            fluid_midi_event_set_type(evt.get(), MIDIEventType::VoiceControlChange as fluid_int);
+            fluid_midi_event_set_channel(evt.get(), chan);
+            fluid_midi_event_set_control(evt.get(), cc);
+            fluid_midi_event_set_value(evt.get(), value);
+            Some(evt)
+        }
+    }
+    pub fn create_program_change_event(chan: fluid_int, program: fluid_int) -> Option<FluidMIDIEvent> {
+        unsafe {
+            let evt = FluidMIDIEvent::new()?;
+            fluid_midi_event_set_type(evt.get(), MIDIEventType::VoiceProgramChange as fluid_int);
+            fluid_midi_event_set_channel(evt.get(), chan);
+            fluid_midi_event_set_program(evt.get(), program);
+            Some(evt)
+        }
     }
     pub fn get(&self) -> *mut fluid_midi_event_t {
         self.midi_event

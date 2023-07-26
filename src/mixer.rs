@@ -1,4 +1,4 @@
-use fft_sound_convolution::{StereoFilter, dtype::RingBuffer, Filter, StereoFFTConvolution, TrueStereoFFTConvolution, FFTConvolution};
+use fft_sound_convolution::{StereoFilter, dtype::{RingBuffer, BaseDequeImplementation}, Filter, StereoFFTConvolution, TrueStereoFFTConvolution, FFTConvolution};
 
 /// Generic Error to represent a variety of errors emitted by the mixer
 #[derive(Debug, Clone)]
@@ -194,6 +194,39 @@ impl RawMixerData {
     ///  before and during rendering.
     pub fn fluid_audio_buffers(&mut self) -> Vec<*mut f32> {
         self.channels.iter_mut().flat_map(|channel| channel.raw_audio_buffers_mut()).collect()
+    }
+}
+
+pub struct DeadRawMixerData {
+    l: BaseDequeImplementation<f32>,
+    r: BaseDequeImplementation<f32>
+}
+impl From<RawMixerData> for DeadRawMixerData {
+    fn from(data: RawMixerData) -> Self {
+        let (l, r) = data.mix().into();
+        DeadRawMixerData { l, r }
+    }
+}
+impl From<Channel> for BaseDequeImplementation<f32> {
+    fn from(channel: Channel) -> Self {
+        channel.buf.into_deque()
+    }
+}
+impl From<StereoChannel> for (BaseDequeImplementation<f32>, BaseDequeImplementation<f32>) {
+    fn from(value: StereoChannel) -> Self {
+        (value.l.into(), value.r.into())
+    }
+}
+impl DeadRawMixerData {
+    pub fn len(&self) -> usize {
+        self.l.len() // Right should return the same thing
+    }
+    pub fn drain(&mut self) -> Option<(f32, f32)> {
+        if let (Some(l), Some(r)) = (self.l.pop_front(), self.r.pop_front()) {
+            Some((l, r))
+        } else {
+            None
+        }
     }
 }
 
