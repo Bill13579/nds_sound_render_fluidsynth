@@ -1,10 +1,9 @@
 /// A wrapper around the library of a simple stateful MIDI-file player
 
-use fft_sound_convolution::{StereoFFTConvolution, StereoFilter};
 use tinyaudio::{OutputDeviceParameters, run_output_device};
 
-use crate::{*, math::quantize_to_bitdepth};
-use std::{path::{Path, PathBuf}, sync::mpsc};
+use crate::{*, math::quantize_to_bitdepth, mixer::{Mixer, DeadRawMixerData, RawMixerData}};
+use std::path::{Path, PathBuf};
 
 // TODO
 pub struct AudioSystem {
@@ -13,13 +12,15 @@ pub struct AudioSystem {
 
 pub struct SequencerSubsystem<'a> {
     synthcore: Arc<SynthCore>,
-    sequencer: FluidSequencer<'a>
+    sequencer: FluidSequencer<'a>,
+    channel_mixer: Mixer,
+    master_mixer: Mixer
 }
 impl<'a> SequencerSubsystem<'a> {
-    pub fn new(synthcore: Arc<SynthCore>) -> Option<SequencerSubsystem<'a>> {
+    pub fn new(synthcore: Arc<SynthCore>, channel_mixer: Mixer, master_mixer: Mixer) -> Option<SequencerSubsystem<'a>> {
         let mut sequencer = FluidSequencer::new()?;
         sequencer.register_fluidsynth(synthcore.synth.clone()); //NOTE: Ignoring return value, which is the client ID, since it's stored inside `FluidSequencer` anyways and automatically freed
-        Some(SequencerSubsystem { synthcore, sequencer })
+        Some(SequencerSubsystem { synthcore, sequencer, channel_mixer, master_mixer })
     }
     pub fn send(&self, midi_event: FluidMIDIEvent) -> Result<(), FluidError> {
         self.sequencer.add_midi_event_to_buffer(&midi_event)
@@ -60,13 +61,24 @@ impl<'a> SequencerSubsystem<'a> {
         self.send_program_change(chan, program)?;
         Ok(())
     }
+    /// Replenish output buffers with new samples.
+    pub fn replenish(&mut self, dest: &mut DeadRawMixerData) -> Result<(), Box<dyn std::error::Error>> {
+        let raw = self.synthcore.render(self.channel_mixer.buffer_size())?;
+        let processed = RawMixerData::from_channels(vec![self.channel_mixer.add_and_drain(&raw)?.mix()])?;
+        let processed = self.master_mixer.add_and_drain(&processed)?;
+        *dest = processed.into();
+        Ok(())
+    }
 }
 
 pub struct FilePlayerSubsystem {
     synthcore: Arc<SynthCore>,
-    player: FluidPlayer
+    player: FluidPlayer,
+    channel_mixer: Mixer,
+    master_mixer: Mixer
 }
 #[repr(i32)]
+#[derive(PartialEq)]
 pub enum PlayerStatus {
     Ready = fluid_player_status_FLUID_PLAYER_READY,
     Playing = fluid_player_status_FLUID_PLAYER_PLAYING,
@@ -74,9 +86,9 @@ pub enum PlayerStatus {
     Done = fluid_player_status_FLUID_PLAYER_DONE
 }
 impl FilePlayerSubsystem {
-    pub fn new(synthcore: Arc<SynthCore>) -> Option<FilePlayerSubsystem> {
+    pub fn new(synthcore: Arc<SynthCore>, channel_mixer: Mixer, master_mixer: Mixer) -> Option<FilePlayerSubsystem> {
         let player = FluidPlayer::new(synthcore.synth.clone())?;
-        Some(FilePlayerSubsystem { synthcore, player })
+        Some(FilePlayerSubsystem { synthcore, player, channel_mixer, master_mixer })
     }
     pub fn set_loop(&self, play_loop: bool) -> Result<(), FluidError> {
         unsafe {
@@ -105,6 +117,24 @@ impl FilePlayerSubsystem {
             fluid_player_status_FLUID_PLAYER_STOPPING => PlayerStatus::Stopping,
             fluid_player_status_FLUID_PLAYER_DONE => PlayerStatus::Done,
             _ => panic!("Unknown `fluid_player_status` value! Has the API changed?")
+        }
+    }
+    /// Replenish output buffers with new samples. Returns a boolean representing
+    ///  if playback has finished.
+    pub fn replenish(&mut self, dest: &mut DeadRawMixerData) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.get_status() == PlayerStatus::Done {
+            let processed = RawMixerData::from_channels(vec![self.channel_mixer.drain_fx()?.mix()])?;
+            let processed = self.master_mixer.add_and_drain(&processed)?;
+            *dest = processed.into();
+            let processed = self.master_mixer.drain_fx()?.into();
+            dest.extend(processed);
+            Ok(true)
+        } else {
+            let raw = self.synthcore.render(self.channel_mixer.buffer_size())?;
+            let processed = RawMixerData::from_channels(vec![self.channel_mixer.add_and_drain(&raw)?.mix()])?;
+            let processed = self.master_mixer.add_and_drain(&processed)?;
+            *dest = processed.into();
+            Ok(false)
         }
     }
 }
@@ -162,6 +192,9 @@ impl SynthCore {
             synth,
             bitdepth
         })
+    }
+    pub fn settings(&self) -> &Arc<FluidSettings> {
+        &self.settings
     }
     pub fn sfload(&self, sound_font: &PathBuf) -> Result<fluid_int, Box<dyn std::error::Error>> {
         Ok(unsafe {

@@ -228,6 +228,10 @@ impl DeadRawMixerData {
             None
         }
     }
+    pub fn extend(&mut self, other: DeadRawMixerData) {
+        self.l.extend(other.l);
+        self.r.extend(other.r);
+    }
 }
 
 pub struct Mixer {
@@ -247,6 +251,15 @@ impl Mixer {
         let latency = Self::calculate_max_latency(&fx).unwrap_or(0);
         let latency_compensation_delays = fx.iter().map(|x| StereoDelay::from_delay_samples(latency - Self::calculate_fx_chain_latency(x.iter()))).collect();
         Mixer { internal_buffer, latency, latency_compensation_delays, drain_len, fx, buffer_size, num_out_channels }
+    }
+    pub fn create_master_mixer(channel_mixer: &Mixer, fx: Vec<Vec<Box<dyn StereoFX>>>) -> Mixer {
+        Mixer::new(channel_mixer.buffer_size, 1, fx)
+    }
+    pub fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+    pub fn num_out_channels(&self) -> usize {
+        self.num_out_channels
     }
     /// Must be called whenever the effects are modified
     pub fn update_fx(&mut self) {
@@ -411,4 +424,6 @@ impl FX for TrueStereoFFTConvolution {
         self.internal_buffer_size() - self.window_size()
     }
 }
+
+mod vst2;
 
