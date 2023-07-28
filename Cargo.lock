@@ -426,6 +426,7 @@ dependencies = [
  "glob",
  "hound",
  "indexmap",
+ "lazy_static",
  "tinyaudio",
  "vst",
 ]

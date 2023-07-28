@@ -2,6 +2,7 @@ use core::panic;
 use std::{path::Path, sync::{Arc, Mutex}};
 
 use fft_sound_convolution::StereoFilter;
+use lazy_static::lazy_static;
 use vst::{self, host::{Host, PluginLoader, PluginInstance, HostBuffer}, prelude::{Plugin, PluginParameters}};
 
 use super::{FX, IsModulatable};
@@ -9,8 +10,11 @@ use super::{FX, IsModulatable};
 pub struct SimpleHost;
 impl Host for SimpleHost {  }
 
+lazy_static! {
+    static ref HOST: Arc<Mutex<SimpleHost>> = Arc::new(Mutex::new(SimpleHost));
+}
+
 pub struct SimpleVst2 {
-    host: Arc<Mutex<SimpleHost>>,
     loader: PluginLoader<SimpleHost>,
     instance: PluginInstance,
     sample_rate: f32,
@@ -19,8 +23,7 @@ pub struct SimpleVst2 {
 unsafe impl Send for SimpleVst2 {  }
 impl SimpleVst2 {
     pub fn new<P: AsRef<Path>>(path: P, sample_rate: f32) -> Result<SimpleVst2, Box<dyn std::error::Error>> {
-        let host = Arc::new(Mutex::new(SimpleHost));
-        let mut loader = PluginLoader::load(path.as_ref(), host.clone())?;
+        let mut loader = PluginLoader::load(path.as_ref(), HOST.clone())?;
         let mut instance = loader.instance()?;
 
         let info = instance.get_info();
@@ -43,7 +46,7 @@ impl SimpleVst2 {
         instance.set_block_size(1);
         instance.resume();
 
-        Ok(SimpleVst2 { host, loader, instance, sample_rate, host_buffer: HostBuffer::new(2, 2) })
+        Ok(SimpleVst2 { loader, instance, sample_rate, host_buffer: HostBuffer::new(2, 2) })
     }
     pub fn get_parameter_object(&mut self) -> Arc<dyn PluginParameters> {
         self.instance.get_parameter_object()

@@ -215,9 +215,9 @@ impl FilePlayerSubsystem {
         let player = FluidPlayer::new(synthcore.synth.clone())?;
         Some(FilePlayerSubsystem { synthcore, player, channel_mixer, master_mixer })
     }
-    pub fn set_loop(&self, play_loop: bool) -> Result<(), FluidError> {
+    pub fn set_loop(&self, n: fluid_int) -> Result<(), FluidError> {
         unsafe {
-            fluid_player_set_loop(self.player.get(), play_loop as fluid_int).fluid_result("Failed to set loop!")
+            fluid_player_set_loop(self.player.get(), n).fluid_result("Failed to set loop!")
         }
     }
     pub fn add<P: AsRef<Path>>(&self, midi_file_path: P) -> Result<(), Box<dyn std::error::Error>> {
