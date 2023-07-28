@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 use fft_sound_convolution::{StereoFilter, dtype::{RingBuffer, BaseDequeImplementation}, Filter, StereoFFTConvolution, TrueStereoFFTConvolution, FFTConvolution};
 
@@ -220,6 +220,9 @@ impl From<StereoChannel> for (BaseDequeImplementation<f32>, BaseDequeImplementat
     }
 }
 impl DeadRawMixerData {
+    pub fn empty() -> DeadRawMixerData {
+        DeadRawMixerData { l: BaseDequeImplementation::default(), r: BaseDequeImplementation::default() }
+    }
     pub fn len(&self) -> usize {
         self.l.len() // Right should return the same thing
     }
@@ -240,14 +243,21 @@ impl DeadRawMixerData {
 }
 
 pub trait ModulationSource: Send {
-    fn modulate(&mut self, destination: &mut dyn ModulatableStereoFX);
+    fn into_dyn(self) -> Box<dyn ModulationSource>;
+    fn modulate(&mut self, destination_id: &mut dyn ModulatableStereoFX);
 }
 pub struct EffectsChain {
     fx_chain: Vec<Box<dyn StereoFX>>,
     modulators: HashMap<String, Vec<Box<dyn ModulationSource>>>
 }
 impl EffectsChain {
-    fn compute(&mut self, mut pair: (f64, f64)) -> (f64, f64) {
+    pub fn new(fx_chain: Vec<Box<dyn StereoFX>>, modulators: HashMap<String, Vec<Box<dyn ModulationSource>>>) -> EffectsChain {
+        EffectsChain { fx_chain, modulators }
+    }
+    pub fn new_static(fx_chain: Vec<Box<dyn StereoFX>>) -> EffectsChain {
+        EffectsChain { fx_chain, modulators: HashMap::new() }
+    }
+    pub fn compute(&mut self, mut pair: (f64, f64)) -> (f64, f64) {
         for effect in self.fx_chain.iter_mut() {
             // HANDLE MODULATABLE EFFECTS
             if let Some(modulatable_effect) = effect.is_modulatable() {
@@ -262,21 +272,21 @@ impl EffectsChain {
         }
         pair
     }
-    fn iter(&self) -> std::slice::Iter<'_, Box<dyn StereoFX>> {
+    pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn StereoFX>> {
         self.fx_chain.iter()
     }
-    fn latency(&self) -> usize {
+    pub fn latency(&self) -> usize {
         Self::calculate_fx_chain_latency(self.fx_chain.iter())
     }
-    fn drain_len(&self) -> usize {
+    pub fn drain_len(&self) -> usize {
         Self::calculate_fx_chain_drain_len(self.fx_chain.iter())
     }
-    fn calculate_fx_chain_latency<'a, I>(fx_chain: I) -> usize
+    pub fn calculate_fx_chain_latency<'a, I>(fx_chain: I) -> usize
     where
         I: Iterator<Item = &'a Box<dyn StereoFX>> {
         fx_chain.fold(0, |acc, x| acc + x.get_latency_samples())
     }
-    fn calculate_fx_chain_drain_len<'a, I>(fx_chain: I) -> usize
+    pub fn calculate_fx_chain_drain_len<'a, I>(fx_chain: I) -> usize
     where
         I: Iterator<Item = &'a Box<dyn StereoFX>> {
         fx_chain.fold(0, |acc, x| acc + x.get_latency_samples() + x.get_tail_samples())
@@ -291,22 +301,22 @@ pub struct Effects {
     fx: Vec<EffectsChain>
 }
 impl Effects {
-    fn new(fx: Vec<EffectsChain>) -> Effects {
+    pub fn new(fx: Vec<EffectsChain>) -> Effects {
         Effects { fx }
     }
-    fn iter(&self) -> std::slice::Iter<'_, EffectsChain> {
+    pub fn iter(&self) -> std::slice::Iter<'_, EffectsChain> {
         self.fx.iter()
     }
-    fn get(&self, channel_number: usize) -> Option<&EffectsChain> {
+    pub fn get(&self, channel_number: usize) -> Option<&EffectsChain> {
         self.fx.get(channel_number)
     }
-    fn get_mut(&mut self, channel_number: usize) -> Option<&mut EffectsChain> {
+    pub fn get_mut(&mut self, channel_number: usize) -> Option<&mut EffectsChain> {
         self.fx.get_mut(channel_number)
     }
-    fn max_latency(&self) -> Option<usize> {
+    pub fn max_latency(&self) -> Option<usize> {
         self.fx.iter().map(|x| x.latency()).max()
     }
-    fn max_drain_len(&self) -> Option<usize> {
+    pub fn max_drain_len(&self) -> Option<usize> {
         self.fx.iter().map(|x| x.drain_len()).max()
     }
 }
@@ -380,27 +390,27 @@ pub trait ModulatableStereoFX: StereoFX {
 }
 pub struct NamedFX<T: StereoFX> {
     name: String,
-    internal_fx: T
+    internal_fx: Arc<Mutex<T>>
 }
 impl<T: StereoFX> NamedFX<T> {
-    pub fn new(name: &str, internal_fx: T) -> NamedFX<T> {
+    pub fn new(name: &str, internal_fx: Arc<Mutex<T>>) -> NamedFX<T> {
         NamedFX { name: name.to_owned(), internal_fx }
     }
 }
 impl<T: StereoFX> StereoFilter for NamedFX<T> {
     fn clear(&mut self) {
-        self.internal_fx.clear()
+        self.internal_fx.lock().unwrap().clear()
     }
     fn compute(&mut self, signal: (f64, f64)) -> (f64, f64) {
-        self.internal_fx.compute(signal)
+        self.internal_fx.lock().unwrap().compute(signal)
     }
 }
 impl<T: StereoFX> FX for NamedFX<T> {
     fn get_latency_samples(&self) -> usize {
-        self.internal_fx.get_latency_samples()
+        self.internal_fx.lock().unwrap().get_latency_samples()
     }
     fn get_tail_samples(&self) -> usize {
-        self.internal_fx.get_tail_samples()
+        self.internal_fx.lock().unwrap().get_tail_samples()
     }
 }
 impl<T: StereoFX> IsModulatable for NamedFX<T> {
@@ -450,9 +460,13 @@ impl Filter for Delay {
         self.out.initialize_again(0.0);
     }
     fn compute(&mut self, signal: f64) -> f64 {
-        let buffered_signal = self.out.pop_front().unwrap();
-        self.out.push_back(signal);
-        buffered_signal
+        if self.delay != 0 {
+            let buffered_signal = self.out.pop_front().unwrap();
+            self.out.push_back(signal);
+            buffered_signal
+        } else {
+            signal
+        }
     }
 }
 impl FX for Delay {
@@ -532,5 +546,5 @@ impl FX for TrueStereoFFTConvolution {
 }
 impl IsModulatable for TrueStereoFFTConvolution {  }
 
-mod vst2;
+pub mod vst2;
 

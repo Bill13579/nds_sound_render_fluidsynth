@@ -2,20 +2,21 @@ use core::panic;
 use std::{path::Path, sync::{Arc, Mutex}};
 
 use fft_sound_convolution::StereoFilter;
-use vst::{self, host::{Host, PluginLoader, PluginInstance, HostBuffer}, prelude::Plugin};
+use vst::{self, host::{Host, PluginLoader, PluginInstance, HostBuffer}, prelude::{Plugin, PluginParameters}};
 
 use super::{FX, IsModulatable};
 
-struct SimpleHost;
+pub struct SimpleHost;
 impl Host for SimpleHost {  }
 
-struct SimpleVst2 {
+pub struct SimpleVst2 {
     host: Arc<Mutex<SimpleHost>>,
     loader: PluginLoader<SimpleHost>,
     instance: PluginInstance,
     sample_rate: f32,
     host_buffer: HostBuffer<f32>
 }
+unsafe impl Send for SimpleVst2 {  }
 impl SimpleVst2 {
     pub fn new<P: AsRef<Path>>(path: P, sample_rate: f32) -> Result<SimpleVst2, Box<dyn std::error::Error>> {
         let host = Arc::new(Mutex::new(SimpleHost));
@@ -43,6 +44,9 @@ impl SimpleVst2 {
         instance.resume();
 
         Ok(SimpleVst2 { host, loader, instance, sample_rate, host_buffer: HostBuffer::new(2, 2) })
+    }
+    pub fn get_parameter_object(&mut self) -> Arc<dyn PluginParameters> {
+        self.instance.get_parameter_object()
     }
 }
 impl StereoFilter for SimpleVst2 {

@@ -60,6 +60,21 @@ impl AudioSystem {
         });
         Ok((audio_system, device?))
     }
+    pub fn add(&mut self, name: String, audio_source: AudioSource) -> Option<(DeadRawMixerData, Option<AudioSource>)> {
+        self.sound_sources.insert(name, (DeadRawMixerData::empty(), Some(audio_source)))
+    }
+    pub fn get(&self, name: &str) -> Option<&AudioSource> {
+        self.sound_sources.get(name)?.1.as_ref()
+    }
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut AudioSource> {
+        self.sound_sources.get_mut(name)?.1.as_mut()
+    }
+    pub fn sound_sources(&self) -> &HashMap<String, (DeadRawMixerData, Option<AudioSource>)> {
+        &self.sound_sources
+    }
+    pub fn sound_sources_mut(&mut self) -> &mut HashMap<String, (DeadRawMixerData, Option<AudioSource>)> {
+        &mut self.sound_sources
+    }
     /// Refill buffers
     fn refill_buffers(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut results = Vec::with_capacity(self.sound_sources.len());

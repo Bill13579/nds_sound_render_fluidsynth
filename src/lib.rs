@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-mod mixer;
+pub mod mixer;
 
 /// Macro to quickly convert any strings and string-likes into an owned CString and then to a C-style string pointer
 ///
