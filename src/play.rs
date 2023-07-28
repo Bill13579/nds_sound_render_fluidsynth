@@ -1,23 +1,134 @@
 /// A wrapper around the library of a simple stateful MIDI-file player
 
-use tinyaudio::{OutputDeviceParameters, run_output_device};
+use tinyaudio::{OutputDeviceParameters, run_output_device, BaseAudioOutputDevice};
 
 use crate::{*, math::quantize_to_bitdepth, mixer::{Mixer, DeadRawMixerData, RawMixerData}};
-use std::path::{Path, PathBuf};
+use std::{path::{Path, PathBuf}, collections::HashMap, sync::Mutex, error::Error};
 
-// TODO
+/// Generic Error to represent a variety of errors emitted by the audio system
+#[derive(Debug, Clone)]
+pub struct AudioSystemError(String);
+impl AudioSystemError {
+    pub fn new(message: &str) -> AudioSystemError {
+        AudioSystemError(String::from(message))
+    }
+}
+impl std::fmt::Display for AudioSystemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", &self.0)
+    }
+}
+impl std::error::Error for AudioSystemError {  }
+
+pub enum AudioSource {
+    Sequencer(SequencerSubsystem),
+    File(FilePlayerSubsystem)
+}
+impl AudioSource {
+    /// Replenish output buffers with new samples. Returns a boolean representing if playback has finished.
+    /// 
+    /// Note
+    /// ====
+    /// As a MIDI sequencer never actually finishes playing, if the audio source is a sequencer, the returned boolean will always be `false`.
+    pub fn replenish(&mut self, dest: &mut DeadRawMixerData) -> Result<bool, Box<dyn std::error::Error>> {
+        match self {
+            AudioSource::Sequencer(seq) => seq.replenish(dest).map(|_| false),
+            AudioSource::File(file) => file.replenish(dest)
+        }
+    }
+}
 pub struct AudioSystem {
+    sound_sources: HashMap<String, (DeadRawMixerData, Option<AudioSource>)>,
+    sample_rate: usize,
+    bitdepth: u8,
+    buffer_size: usize,
+}
+impl AudioSystem {
+    pub fn new(sample_rate: usize, bitdepth: u8, buffer_size: usize) -> Result<(Arc<Mutex<AudioSystem>>, Box<dyn BaseAudioOutputDevice>), Box<dyn std::error::Error>> {
+        let audio_system = Arc::new(Mutex::new(AudioSystem {
+            sound_sources: HashMap::new(),
+            sample_rate, bitdepth, buffer_size
+        }));
+        let params = OutputDeviceParameters {
+            channels_count: 2,
+            sample_rate,
+            channel_sample_count: buffer_size
+        };
+        let audio_system_copy = audio_system.clone();
+        let device = run_output_device(params, move |data| {
+            audio_system_copy.lock().unwrap().run(data).expect("Failed to render some samples!!");
+        });
+        Ok((audio_system, device?))
+    }
+    pub fn run(&mut self, data: &mut [f32]) -> Result<(), Box<dyn std::error::Error>> {
+        let refill_buffers = |audio_system: &mut AudioSystem| -> Result<(), Box<dyn std::error::Error>> {
+            // Refill buffers
+            let mut results = Vec::with_capacity(audio_system.sound_sources.len());
+            audio_system.sound_sources.retain(|_, (buf, sound_source)| {
+                if buf.is_empty() {
+                    if let Some(sound_source_unwrap) = sound_source {
+                        let is_playback_finished_result = sound_source_unwrap.replenish(buf);
+                        let is_playback_finished = *is_playback_finished_result.as_ref().unwrap_or(&true);
+                        results.push(is_playback_finished_result.map(|_| ()));
+                        if is_playback_finished {
+                            *sound_source = None;
+                        }
+                        return true;
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return true;
+                }
+            });
+            results.into_iter().try_for_each(|x| x)?;
+            Ok(())
+        };
+        refill_buffers(self)?;
 
+        // Gather a sample from all the buffers
+        let gather = |audio_system: &mut AudioSystem| -> ((f32, f32), bool) {
+            audio_system.sound_sources.values_mut().fold(((0.0, 0.0), false), |acc, (store, _)| {
+                let ((total_l, total_r), mut needs_refill) = acc;
+                if let Some((l, r)) = store.drain() {
+                    if store.is_empty() {
+                        needs_refill = true;
+                    }
+                    ((total_l + l, total_r + r), needs_refill)
+                } else {
+                    panic!("Unreachable as once a store is determined to have been cleared fully, `refill_buffers` should be automatically called.");
+                }
+            })
+        };
+
+        for pair in data.chunks_mut(2) {
+            if pair.len() == 1 { return Err(Box::new(AudioSystemError::new("TinyAudio has sent an odd length buffer! Stereo audio must have an even length buffer."))); }
+            let ((mut l, mut r), needs_refill) = gather(self);
+            // HANDLE BITDEPTH REDUCTION
+            if self.bitdepth != 0 {
+                l = quantize_to_bitdepth(l, self.bitdepth);
+                r = quantize_to_bitdepth(r, self.bitdepth);
+            }
+            // END
+            pair[0] = l;
+            pair[1] = r;
+            if needs_refill {
+                refill_buffers(self)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
-pub struct SequencerSubsystem<'a> {
+pub struct SequencerSubsystem {
     synthcore: Arc<SynthCore>,
-    sequencer: FluidSequencer<'a>,
+    sequencer: FluidSequencer,
     channel_mixer: Mixer,
     master_mixer: Mixer
 }
-impl<'a> SequencerSubsystem<'a> {
-    pub fn new(synthcore: Arc<SynthCore>, channel_mixer: Mixer, master_mixer: Mixer) -> Option<SequencerSubsystem<'a>> {
+impl SequencerSubsystem {
+    pub fn new(synthcore: Arc<SynthCore>, channel_mixer: Mixer, master_mixer: Mixer) -> Option<SequencerSubsystem> {
         let mut sequencer = FluidSequencer::new()?;
         sequencer.register_fluidsynth(synthcore.synth.clone()); //NOTE: Ignoring return value, which is the client ID, since it's stored inside `FluidSequencer` anyways and automatically freed
         Some(SequencerSubsystem { synthcore, sequencer, channel_mixer, master_mixer })
@@ -146,11 +257,10 @@ impl FilePlayerSubsystem {
 /// TODO: Need to implement everything commented out down below
 pub struct SynthCore {
     settings: Arc<FluidSettings>,
-    synth: Arc<FluidSynth>,
-    bitdepth: u8
+    synth: Arc<FluidSynth>
 }
 impl SynthCore {
-    pub fn new(channels: fluid_int, bitdepth: u8, sample_rate: u32, interp: fluid_int) -> Result<SynthCore, Box<dyn std::error::Error>> {
+    pub fn new(channels: fluid_int, sample_rate: u32, interp: fluid_int) -> Result<SynthCore, Box<dyn std::error::Error>> {
         let settings = Arc::new(FluidSettings::new());
 
         unsafe {
@@ -189,8 +299,7 @@ impl SynthCore {
 
         Ok(SynthCore {
             settings,
-            synth,
-            bitdepth
+            synth
         })
     }
     pub fn settings(&self) -> &Arc<FluidSettings> {

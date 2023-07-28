@@ -213,6 +213,7 @@ pub struct FluidPlayer {
     _synth: Arc<FluidSynth>,
     player: *mut fluid_player_t
 }
+unsafe impl Send for FluidPlayer {  }
 impl FluidPlayer {
     pub fn new(synth: Arc<FluidSynth>) -> Option<FluidPlayer> {
         unsafe {
@@ -337,12 +338,13 @@ impl Drop for FluidMIDIEvent {
 ///  simply automatically calls `delete_fluid_sequencer`
 ///  upon being dropped. Usage of the internal `sequencer`
 ///  object thus still requires unsafe code from fluid.
-pub struct FluidSequencer<'a> {
-    clients: IndexMap<fluid_seq_id_t, Arc<dyn Send + Sync + 'a>>,
+pub struct FluidSequencer {
+    clients: IndexMap<fluid_seq_id_t, Arc<dyn Send + Sync>>,
     sequencer: *mut fluid_sequencer_t
 }
-impl<'a> FluidSequencer<'a> {
-    pub fn new() -> Option<FluidSequencer<'a>> {
+unsafe impl Send for FluidSequencer {  }
+impl FluidSequencer {
+    pub fn new() -> Option<FluidSequencer> {
         Some(FluidSequencer {
             clients: IndexMap::new(),
             sequencer: unsafe {
@@ -372,12 +374,12 @@ impl<'a> FluidSequencer<'a> {
             fluid_sequencer_unregister_client(self.get(), seq_id);
         }
     }
-    pub fn unregister_client(&mut self, seq_id: fluid_seq_id_t) -> Option<Arc<dyn Send + Sync + 'a>> {
+    pub fn unregister_client(&mut self, seq_id: fluid_seq_id_t) -> Option<Arc<dyn Send + Sync>> {
         self._unregister_client(seq_id);
         self.clients.shift_remove(&seq_id)
     }
 }
-impl<'a> Drop for FluidSequencer<'a> {
+impl Drop for FluidSequencer {
     fn drop(&mut self) {
         for &seq_id in self.clients.keys() {
             unsafe {

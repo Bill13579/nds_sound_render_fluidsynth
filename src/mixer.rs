@@ -223,6 +223,9 @@ impl DeadRawMixerData {
     pub fn len(&self) -> usize {
         self.l.len() // Right should return the same thing
     }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     pub fn drain(&mut self) -> Option<(f32, f32)> {
         if let (Some(l), Some(r)) = (self.l.pop_front(), self.r.pop_front()) {
             Some((l, r))
@@ -236,7 +239,7 @@ impl DeadRawMixerData {
     }
 }
 
-pub trait ModulationSource {
+pub trait ModulationSource: Send {
     fn modulate(&mut self, destination: &mut dyn ModulatableStereoFX);
 }
 pub struct EffectsChain {
@@ -422,8 +425,8 @@ pub trait IsModulatable {
         None
     }
 }
-pub trait StereoFX: StereoFilter + FX + IsModulatable {  }
-impl<T> StereoFX for T where T: StereoFilter + FX + IsModulatable {  }
+pub trait StereoFX: StereoFilter + FX + IsModulatable + Send {  }
+impl<T> StereoFX for T where T: StereoFilter + FX + IsModulatable + Send {  }
 
 pub struct Delay {
     out: RingBuffer<f64>,
