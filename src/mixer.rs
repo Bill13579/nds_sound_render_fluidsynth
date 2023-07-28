@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use fft_sound_convolution::{StereoFilter, dtype::{RingBuffer, BaseDequeImplementation}, Filter, StereoFFTConvolution, TrueStereoFFTConvolution, FFTConvolution};
 
 /// Generic Error to represent a variety of errors emitted by the mixer
@@ -234,75 +236,37 @@ impl DeadRawMixerData {
     }
 }
 
-pub struct Mixer {
-    internal_buffer: RawMixerData,
-    latency: usize,
-    latency_compensation_delays: Vec<StereoDelay>,
-    drain_len: usize,
-    fx: Vec<Vec<Box<dyn StereoFX>>>,
-    buffer_size: usize,
-    num_out_channels: usize
+pub trait ModulationSource {
+    fn modulate(&mut self, destination: &mut dyn ModulatableStereoFX);
 }
-impl Mixer {
-    pub fn new(buffer_size: usize, num_out_channels: usize, fx: Vec<Vec<Box<dyn StereoFX>>>) -> Mixer {
-        let mut internal_buffer = RawMixerData::new(num_out_channels);
-        let drain_len = Self::calculate_max_drain_len(&fx).unwrap_or(0);
-        internal_buffer.init_len(buffer_size + drain_len);
-        let latency = Self::calculate_max_latency(&fx).unwrap_or(0);
-        let latency_compensation_delays = fx.iter().map(|x| StereoDelay::from_delay_samples(latency - Self::calculate_fx_chain_latency(x.iter()))).collect();
-        Mixer { internal_buffer, latency, latency_compensation_delays, drain_len, fx, buffer_size, num_out_channels }
-    }
-    pub fn create_master_mixer(channel_mixer: &Mixer, fx: Vec<Vec<Box<dyn StereoFX>>>) -> Mixer {
-        Mixer::new(channel_mixer.buffer_size, 1, fx)
-    }
-    pub fn buffer_size(&self) -> usize {
-        self.buffer_size
-    }
-    pub fn num_out_channels(&self) -> usize {
-        self.num_out_channels
-    }
-    /// Must be called whenever the effects are modified
-    pub fn update_fx(&mut self) {
-        self.drain_len = Self::calculate_max_drain_len(&self.fx).unwrap_or(0);
-        let _: Result<(), _> = self.internal_buffer.expand(self.buffer_size + self.drain_len);
-        self.latency = Self::calculate_max_latency(&self.fx).unwrap_or(0);
-        for (channel_i, fx_chain) in self.fx.iter().enumerate() {
-            self.latency_compensation_delays[channel_i].resize(self.latency - Self::calculate_fx_chain_latency(fx_chain.iter()));
-        }
-    }
-    pub fn add(&mut self, chunk: &RawMixerData) {
-        for (i, (internal, source)) in self.internal_buffer.channels.iter_mut().zip(chunk.channels.iter()).enumerate() {
-            for ((&l, &r), (internal_l, internal_r)) in source.l.audio_buffer().iter().zip(source.r.audio_buffer())
-            .zip(internal.l.audio_buffer_mut().iter_mut().zip(internal.r.audio_buffer_mut().iter_mut())) {
-                let mut pair = self.latency_compensation_delays[i].compute((l as f64, r as f64));
-                for effect in self.fx[i].iter_mut() {
-                    pair = effect.compute(pair);
+pub struct EffectsChain {
+    fx_chain: Vec<Box<dyn StereoFX>>,
+    modulators: HashMap<String, Vec<Box<dyn ModulationSource>>>
+}
+impl EffectsChain {
+    fn compute(&mut self, mut pair: (f64, f64)) -> (f64, f64) {
+        for effect in self.fx_chain.iter_mut() {
+            // HANDLE MODULATABLE EFFECTS
+            if let Some(modulatable_effect) = effect.is_modulatable() {
+                if let Some(modulators) = self.modulators.get_mut(modulatable_effect.get_name()) {
+                    for modulator in modulators {
+                        modulator.modulate(modulatable_effect);
+                    }
                 }
-                *internal_l += pair.0 as f32;
-                *internal_r += pair.1 as f32;
             }
+            // END
+            pair = effect.compute(pair);
         }
+        pair
     }
-    pub fn add_and_drain(&mut self, chunk: &RawMixerData) -> Result<RawMixerData, MixerError> {
-        self.add(chunk);
-        let num_samples = chunk.len().ok_or(MixerError::new("Could not obtain length of chunk! Chunk does not contain any channels."))?;
-        self.internal_buffer.drain(num_samples)
+    fn iter(&self) -> std::slice::Iter<'_, Box<dyn StereoFX>> {
+        self.fx_chain.iter()
     }
-    pub fn render_late_fx(&mut self) {
-        let mut empty_buffer = RawMixerData::new(self.num_out_channels);
-        empty_buffer.init_len(self.drain_len);
-        self.add(&empty_buffer);
+    fn latency(&self) -> usize {
+        Self::calculate_fx_chain_latency(self.fx_chain.iter())
     }
-    pub fn drain_fx(&mut self) -> Result<RawMixerData, MixerError> {
-        let mut empty_buffer = RawMixerData::new(self.num_out_channels);
-        empty_buffer.init_len(self.drain_len);
-        self.add_and_drain(&empty_buffer)
-    }
-    fn calculate_max_latency(fx: &Vec<Vec<Box<dyn StereoFX>>>) -> Option<usize> {
-        fx.iter().map(|x| Self::calculate_fx_chain_latency(x.iter())).max()
-    }
-    fn calculate_max_drain_len(fx: &Vec<Vec<Box<dyn StereoFX>>>) -> Option<usize> {
-        fx.iter().map(|x| Self::calculate_fx_chain_drain_len(x.iter())).max()
+    fn drain_len(&self) -> usize {
+        Self::calculate_fx_chain_drain_len(self.fx_chain.iter())
     }
     fn calculate_fx_chain_latency<'a, I>(fx_chain: I) -> usize
     where
@@ -315,6 +279,137 @@ impl Mixer {
         fx_chain.fold(0, |acc, x| acc + x.get_latency_samples() + x.get_tail_samples())
     }
 }
+impl Default for EffectsChain {
+    fn default() -> Self {
+        Self { fx_chain: Default::default(), modulators: Default::default() }
+    }
+}
+pub struct Effects {
+    fx: Vec<EffectsChain>
+}
+impl Effects {
+    fn new(fx: Vec<EffectsChain>) -> Effects {
+        Effects { fx }
+    }
+    fn iter(&self) -> std::slice::Iter<'_, EffectsChain> {
+        self.fx.iter()
+    }
+    fn get(&self, channel_number: usize) -> Option<&EffectsChain> {
+        self.fx.get(channel_number)
+    }
+    fn get_mut(&mut self, channel_number: usize) -> Option<&mut EffectsChain> {
+        self.fx.get_mut(channel_number)
+    }
+    fn max_latency(&self) -> Option<usize> {
+        self.fx.iter().map(|x| x.latency()).max()
+    }
+    fn max_drain_len(&self) -> Option<usize> {
+        self.fx.iter().map(|x| x.drain_len()).max()
+    }
+}
+
+pub struct Mixer {
+    internal_buffer: RawMixerData,
+    latency: usize,
+    latency_compensation_delays: Vec<StereoDelay>,
+    drain_len: usize,
+    fx: Effects,
+    buffer_size: usize,
+    num_out_channels: usize
+}
+impl Mixer {
+    pub fn new(buffer_size: usize, num_out_channels: usize, fx: Effects) -> Mixer {
+        let mut internal_buffer = RawMixerData::new(num_out_channels);
+        let drain_len = fx.max_drain_len().unwrap_or(0);
+        internal_buffer.init_len(buffer_size + drain_len);
+        let latency = fx.max_latency().unwrap_or(0);
+        let latency_compensation_delays = fx.iter().map(|x| StereoDelay::from_delay_samples(latency - x.latency())).collect();
+        Mixer { internal_buffer, latency, latency_compensation_delays, drain_len, fx, buffer_size, num_out_channels }
+    }
+    pub fn create_master_mixer(channel_mixer: &Mixer, fx: Effects) -> Mixer {
+        Mixer::new(channel_mixer.buffer_size, 1, fx)
+    }
+    pub fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+    pub fn num_out_channels(&self) -> usize {
+        self.num_out_channels
+    }
+    /// Must be called whenever the effects are modified
+    pub fn update_fx(&mut self) {
+        self.drain_len = self.fx.max_drain_len().unwrap_or(0);
+        let _: Result<(), _> = self.internal_buffer.expand(self.buffer_size + self.drain_len);
+        self.latency = self.fx.max_latency().unwrap_or(0);
+        for (channel_i, fx_chain) in self.fx.iter().enumerate() {
+            self.latency_compensation_delays[channel_i].resize(self.latency - fx_chain.latency());
+        }
+    }
+    pub fn add(&mut self, chunk: &RawMixerData) -> Result<(), MixerError> {
+        for (i, (internal, source)) in self.internal_buffer.channels.iter_mut().zip(chunk.channels.iter()).enumerate() {
+            for ((&l, &r), (internal_l, internal_r)) in source.l.audio_buffer().iter().zip(source.r.audio_buffer())
+            .zip(internal.l.audio_buffer_mut().iter_mut().zip(internal.r.audio_buffer_mut().iter_mut())) {
+                let mut pair = self.latency_compensation_delays[i].compute((l as f64, r as f64));
+                pair = self.fx.get_mut(i).ok_or(MixerError::new(&format!("Failed to process effects for channel number {}! Out of bounds in the effects array.", i)))?.compute(pair);
+                *internal_l += pair.0 as f32;
+                *internal_r += pair.1 as f32;
+            }
+        }
+        Ok(())
+    }
+    pub fn add_and_drain(&mut self, chunk: &RawMixerData) -> Result<RawMixerData, MixerError> {
+        self.add(chunk)?;
+        let num_samples = chunk.len().ok_or(MixerError::new("Could not obtain length of chunk! Chunk does not contain any channels."))?;
+        self.internal_buffer.drain(num_samples)
+    }
+    pub fn render_late_fx(&mut self) -> Result<(), MixerError> {
+        let mut empty_buffer = RawMixerData::new(self.num_out_channels);
+        empty_buffer.init_len(self.drain_len);
+        self.add(&empty_buffer)
+    }
+    pub fn drain_fx(&mut self) -> Result<RawMixerData, MixerError> {
+        let mut empty_buffer = RawMixerData::new(self.num_out_channels);
+        empty_buffer.init_len(self.drain_len);
+        self.add_and_drain(&empty_buffer)
+    }
+}
+pub trait ModulatableStereoFX: StereoFX {
+    fn get_name(&self) -> &str;
+}
+pub struct NamedFX<T: StereoFX> {
+    name: String,
+    internal_fx: T
+}
+impl<T: StereoFX> NamedFX<T> {
+    pub fn new(name: &str, internal_fx: T) -> NamedFX<T> {
+        NamedFX { name: name.to_owned(), internal_fx }
+    }
+}
+impl<T: StereoFX> StereoFilter for NamedFX<T> {
+    fn clear(&mut self) {
+        self.internal_fx.clear()
+    }
+    fn compute(&mut self, signal: (f64, f64)) -> (f64, f64) {
+        self.internal_fx.compute(signal)
+    }
+}
+impl<T: StereoFX> FX for NamedFX<T> {
+    fn get_latency_samples(&self) -> usize {
+        self.internal_fx.get_latency_samples()
+    }
+    fn get_tail_samples(&self) -> usize {
+        self.internal_fx.get_tail_samples()
+    }
+}
+impl<T: StereoFX> IsModulatable for NamedFX<T> {
+    fn is_modulatable(&mut self) -> Option<&mut dyn ModulatableStereoFX> {
+        Some(self)
+    }
+}
+impl<T: StereoFX> ModulatableStereoFX for NamedFX<T> {
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+}
 
 pub trait FX {
     fn get_latency_samples(&self) -> usize;
@@ -322,8 +417,13 @@ pub trait FX {
 }
 pub trait MonoFX: Filter + FX {  }
 impl<T> MonoFX for T where T: Filter + FX {  }
-pub trait StereoFX: StereoFilter + FX {  }
-impl<T> StereoFX for T where T: StereoFilter + FX {  }
+pub trait IsModulatable {
+    fn is_modulatable(&mut self) -> Option<&mut dyn ModulatableStereoFX> {
+        None
+    }
+}
+pub trait StereoFX: StereoFilter + FX + IsModulatable {  }
+impl<T> StereoFX for T where T: StereoFilter + FX + IsModulatable {  }
 
 pub struct Delay {
     out: RingBuffer<f64>,
@@ -399,6 +499,7 @@ impl FX for StereoDelay {
         self.l.get_tail_samples().max(self.r.get_tail_samples())
     }
 }
+impl IsModulatable for StereoDelay {  }
 
 impl FX for FFTConvolution {
     fn get_latency_samples(&self) -> usize {
@@ -408,6 +509,7 @@ impl FX for FFTConvolution {
         self.internal_buffer_size() - self.window_size()
     }
 }
+impl IsModulatable for FFTConvolution {  }
 impl FX for StereoFFTConvolution {
     fn get_latency_samples(&self) -> usize {
         self.window_size()
@@ -416,6 +518,7 @@ impl FX for StereoFFTConvolution {
         self.internal_buffer_size() - self.window_size()
     }
 }
+impl IsModulatable for StereoFFTConvolution {  }
 impl FX for TrueStereoFFTConvolution {
     fn get_latency_samples(&self) -> usize {
         self.window_size()
@@ -424,6 +527,7 @@ impl FX for TrueStereoFFTConvolution {
         self.internal_buffer_size() - self.window_size()
     }
 }
+impl IsModulatable for TrueStereoFFTConvolution {  }
 
 mod vst2;
 

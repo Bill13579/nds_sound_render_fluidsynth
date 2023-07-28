@@ -4,7 +4,7 @@ use std::{path::Path, sync::{Arc, Mutex}};
 use fft_sound_convolution::StereoFilter;
 use vst::{self, host::{Host, PluginLoader, PluginInstance, HostBuffer}, prelude::Plugin};
 
-use super::FX;
+use super::{FX, IsModulatable};
 
 struct SimpleHost;
 impl Host for SimpleHost {  }
@@ -64,4 +64,5 @@ impl FX for SimpleVst2 {
         ((self.sample_rate * self.instance.get_tail_size() as f32).ceil() as usize).max(self.get_latency_samples())
     }
 }
+impl IsModulatable for SimpleVst2 {  }
 
