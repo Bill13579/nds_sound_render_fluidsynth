@@ -60,50 +60,49 @@ impl AudioSystem {
         });
         Ok((audio_system, device?))
     }
-    pub fn run(&mut self, data: &mut [f32]) -> Result<(), Box<dyn std::error::Error>> {
-        let refill_buffers = |audio_system: &mut AudioSystem| -> Result<(), Box<dyn std::error::Error>> {
-            // Refill buffers
-            let mut results = Vec::with_capacity(audio_system.sound_sources.len());
-            audio_system.sound_sources.retain(|_, (buf, sound_source)| {
-                if buf.is_empty() {
-                    if let Some(sound_source_unwrap) = sound_source {
-                        let is_playback_finished_result = sound_source_unwrap.replenish(buf);
-                        let is_playback_finished = *is_playback_finished_result.as_ref().unwrap_or(&true);
-                        results.push(is_playback_finished_result.map(|_| ()));
-                        if is_playback_finished {
-                            *sound_source = None;
-                        }
-                        return true;
-                    } else {
-                        return false;
+    /// Refill buffers
+    fn refill_buffers(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut results = Vec::with_capacity(self.sound_sources.len());
+        self.sound_sources.retain(|_, (buf, sound_source)| {
+            if buf.is_empty() {
+                if let Some(sound_source_unwrap) = sound_source {
+                    let is_playback_finished_result = sound_source_unwrap.replenish(buf);
+                    let is_playback_finished = *is_playback_finished_result.as_ref().unwrap_or(&true);
+                    results.push(is_playback_finished_result.map(|_| ()));
+                    if is_playback_finished {
+                        *sound_source = None;
                     }
-                } else {
                     return true;
-                }
-            });
-            results.into_iter().try_for_each(|x| x)?;
-            Ok(())
-        };
-        refill_buffers(self)?;
-
-        // Gather a sample from all the buffers
-        let gather = |audio_system: &mut AudioSystem| -> ((f32, f32), bool) {
-            audio_system.sound_sources.values_mut().fold(((0.0, 0.0), false), |acc, (store, _)| {
-                let ((total_l, total_r), mut needs_refill) = acc;
-                if let Some((l, r)) = store.drain() {
-                    if store.is_empty() {
-                        needs_refill = true;
-                    }
-                    ((total_l + l, total_r + r), needs_refill)
                 } else {
-                    panic!("Unreachable as once a store is determined to have been cleared fully, `refill_buffers` should be automatically called.");
+                    return false;
                 }
-            })
-        };
+            } else {
+                return true;
+            }
+        });
+        results.into_iter().try_for_each(|x| x)?;
+        Ok(())
+    }
+    /// Gather a sample from all the buffers
+    fn gather(&mut self) -> ((f32, f32), bool) {
+        self.sound_sources.values_mut().fold(((0.0, 0.0), false), |acc, (store, _)| {
+            let ((total_l, total_r), mut needs_refill) = acc;
+            if let Some((l, r)) = store.drain() {
+                if store.is_empty() {
+                    needs_refill = true;
+                }
+                ((total_l + l, total_r + r), needs_refill)
+            } else {
+                panic!("Unreachable as once a store is determined to have been cleared fully, `refill_buffers` should be automatically called.");
+            }
+        })
+    }
+    pub fn run(&mut self, data: &mut [f32]) -> Result<(), Box<dyn std::error::Error>> {
+        self.refill_buffers()?;
 
         for pair in data.chunks_mut(2) {
             if pair.len() == 1 { return Err(Box::new(AudioSystemError::new("TinyAudio has sent an odd length buffer! Stereo audio must have an even length buffer."))); }
-            let ((mut l, mut r), needs_refill) = gather(self);
+            let ((mut l, mut r), needs_refill) = self.gather();
             // HANDLE BITDEPTH REDUCTION
             if self.bitdepth != 0 {
                 l = quantize_to_bitdepth(l, self.bitdepth);
@@ -113,7 +112,7 @@ impl AudioSystem {
             pair[0] = l;
             pair[1] = r;
             if needs_refill {
-                refill_buffers(self)?;
+                self.refill_buffers()?;
             }
         }
 
