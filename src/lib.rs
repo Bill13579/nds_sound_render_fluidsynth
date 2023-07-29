@@ -2,7 +2,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{ptr::NonNull, ffi::{CString, c_void}, sync::Arc};
+use std::{ptr::{NonNull, null_mut}, ffi::{CString, c_void, c_char, CStr}, sync::Arc, slice};
 
 use indexmap::IndexMap;
 
@@ -275,6 +275,24 @@ enum MIDIEventType {
     VoicePitchBend = 0xE0,
     SystemExclusive = 0xF0
 }
+#[repr(i32)]
+enum MIDIMetaEventType {
+    MetaSequence = 0x00,
+    MetaText = 0x01,
+    MetaCopyright = 0x02,
+    MetaTrackName = 0x03,
+    MetaInstrumentName = 0x04,
+    MetaLyrics = 0x05,
+    MetaMarker = 0x06,
+    MetaCuePoint = 0x07,
+    MetaChannelPrefix = 0x20,
+    MetaEndOfTrack = 0x2F,
+    MetaSetTempo = 0x51,
+    MetaSMPTEOffset = 0x54,
+    MetaTimeSignature = 0x58,
+    MetaKeySignature = 0x59,
+    MetaSequencerSpecific = 0x7F,
+}
 impl FluidMIDIEvent {
     pub fn new() -> Option<FluidMIDIEvent> {
         Some(FluidMIDIEvent {
@@ -282,6 +300,21 @@ impl FluidMIDIEvent {
                 NonNull::new(new_fluid_midi_event()).map(|nonnull| nonnull.as_ptr())?
             }
         })
+    }
+    pub fn from_raw(fluid_midi_event_t: *mut fluid_midi_event_t) -> FluidMIDIEvent {
+        FluidMIDIEvent { midi_event: fluid_midi_event_t }
+    }
+    /// Dissolve the MIDI event Rust-struct without dropping the underlying FluidSynth MIDI event object
+    pub fn into_raw(self) -> *mut fluid_midi_event_t {
+        use std::{mem::MaybeUninit, ptr};
+
+        let x = MaybeUninit::new(self);
+        let x = x.as_ptr();
+        unsafe {
+            let midi_event = ptr::read(&(*x).midi_event);
+
+            midi_event
+        }
     }
     pub fn create_note_on_event(chan: fluid_int, key: fluid_int, velocity: fluid_int) -> Option<FluidMIDIEvent> {
         unsafe {
@@ -324,6 +357,34 @@ impl FluidMIDIEvent {
     }
     pub fn get(&self) -> *mut fluid_midi_event_t {
         self.midi_event
+    }
+    pub fn get_type(&self) -> fluid_int {
+        unsafe {
+            fluid_midi_event_get_type(self.get())
+        }
+    }
+    pub fn get_channel(&self) -> fluid_int {
+        unsafe {
+            fluid_midi_event_get_channel(self.get())
+        }
+    }
+    pub fn get_text(&self) -> Result<String, Box<dyn std::error::Error>> {
+        unsafe {
+            let mut data: *mut c_void = null_mut();
+            let mut size: fluid_int = 0;
+            fluid_midi_event_get_text(self.get(), &mut data as *mut *mut c_void, &mut size as *mut fluid_int).fluid_result("Failed to get text from midi event!")?;
+            let sl = slice::from_raw_parts::<'_, c_char>(data as *const c_char, size as usize);
+            let sl_u8: &[u8] = std::mem::transmute(sl);
+            Ok(String::from_utf8(sl_u8.to_vec())?)
+        }
+    }
+    pub fn get_text_nul(&self) -> Result<String, Box<dyn std::error::Error>> {
+        unsafe {
+            let mut data: *mut c_void = null_mut();
+            let mut size: fluid_int = 0;
+            fluid_midi_event_get_text(self.get(), &mut data as *mut *mut c_void, &mut size as *mut fluid_int).fluid_result("Failed to get text from midi event!")?;
+            Ok(CStr::from_ptr(data as *const i8).to_str()?.to_owned())
+        }
     }
 }
 impl Drop for FluidMIDIEvent {

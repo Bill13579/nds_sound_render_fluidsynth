@@ -3,7 +3,7 @@
 use tinyaudio::{OutputDeviceParameters, run_output_device, BaseAudioOutputDevice};
 
 use crate::{*, math::quantize_to_bitdepth, mixer::{Mixer, DeadRawMixerData, RawMixerData}};
-use std::{path::{Path, PathBuf}, collections::HashMap, sync::Mutex, error::Error};
+use std::{path::{Path, PathBuf}, collections::HashMap, sync::Mutex, error::Error, os::raw::c_void};
 
 /// Generic Error to represent a variety of errors emitted by the audio system
 #[derive(Debug, Clone)]
@@ -199,6 +199,7 @@ impl SequencerSubsystem {
 pub struct FilePlayerSubsystem {
     synthcore: Arc<SynthCore>,
     player: FluidPlayer,
+    address: Box<_PlayerAndSynthAddress>,
     channel_mixer: Mixer,
     master_mixer: Mixer
 }
@@ -210,10 +211,43 @@ pub enum PlayerStatus {
     Stopping = fluid_player_status_FLUID_PLAYER_STOPPING,
     Done = fluid_player_status_FLUID_PLAYER_DONE
 }
+#[derive(Debug)]
+struct _PlayerAndSynthAddress {
+    player: *mut fluid_player_t,
+    synth: *mut fluid_synth_t
+}
+unsafe impl Send for _PlayerAndSynthAddress {  }
 impl FilePlayerSubsystem {
+    #[no_mangle]
+    extern "C" fn handle_midi_event(data: *mut c_void, event: *mut fluid_midi_event_t) -> fluid_int {
+        let address;
+        unsafe {
+            address = &*(data as *const _PlayerAndSynthAddress);
+        }
+        let midi_event = FluidMIDIEvent::from_raw(event);
+        if midi_event.get_type() == MIDIMetaEventType::MetaText as fluid_int {
+            if let Ok(st) = midi_event.get_text_nul() {
+                if st.starts_with("Jump ") {
+                    if let Ok(jump) = st[5..].parse::<fluid_int>() {
+                        unsafe {
+                            fluid_player_seek(address.player, jump);
+                        }
+                    }
+                }
+            }
+        }
+        midi_event.into_raw(); // Release the midi event pointer. Otherwise the event will be dropped!
+        unsafe {
+            fluid_synth_handle_midi_event(address.synth as *mut c_void, event)
+        }
+    }
     pub fn new(synthcore: Arc<SynthCore>, channel_mixer: Mixer, master_mixer: Mixer) -> Option<FilePlayerSubsystem> {
         let player = FluidPlayer::new(synthcore.synth.clone())?;
-        Some(FilePlayerSubsystem { synthcore, player, channel_mixer, master_mixer })
+        let address = Box::new(_PlayerAndSynthAddress { player: player.get(), synth: synthcore.synth.get() });
+        unsafe {
+            fluid_player_set_playback_callback(player.get(), Some(FilePlayerSubsystem::handle_midi_event), address.as_ref() as *const _PlayerAndSynthAddress as *mut c_void).fluid_result("").ok()?;
+        }
+        Some(FilePlayerSubsystem { address, synthcore, player, channel_mixer, master_mixer })
     }
     pub fn set_loop(&self, n: fluid_int) -> Result<(), FluidError> {
         unsafe {
