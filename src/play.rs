@@ -229,6 +229,7 @@ impl FilePlayerSubsystem {
             if let Ok(st) = midi_event.get_text_nul() {
                 if st.starts_with("Jump ") {
                     if let Ok(jump) = st[5..].parse::<fluid_int>() {
+                        println!("{}", jump);
                         unsafe {
                             fluid_player_seek(address.player, jump);
                         }
