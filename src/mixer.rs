@@ -1,6 +1,16 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 
-use fft_sound_convolution::{StereoFilter, dtype::{RingBuffer, BaseDequeImplementation}, Filter, StereoFFTConvolution, TrueStereoFFTConvolution, FFTConvolution};
+use fft_sound_convolution::{dtype::{RingBuffer}, Filter, StereoFFTConvolution, TrueStereoFFTConvolution, FFTConvolution};
+use slice_ring_buffer::SliceRingBuffer;
+
+pub trait MonoSoundProcessor {
+    fn clear(&mut self);
+    fn compute(&mut self, signal: &Channel) -> Channel;
+}
+pub trait SoundProcessor {
+    fn clear(&mut self);
+    fn compute(&mut self, signal: &StereoChannel) -> StereoChannel;
+}
 
 /// Generic Error to represent a variety of errors emitted by the mixer
 #[derive(Debug, Clone)]
@@ -17,8 +27,14 @@ impl std::fmt::Display for MixerError {
 }
 impl std::error::Error for MixerError {  }
 
+#[derive(Clone)]
 pub struct Channel {
     buf: RingBuffer<f32>
+}
+impl From<Vec<f32>> for Channel {
+    fn from(value: Vec<f32>) -> Self {
+        Channel::from_buf(RingBuffer::from_deque(SliceRingBuffer::from_iter(value)))
+    }
 }
 impl Channel {
     pub fn new() -> Channel {
@@ -42,13 +58,21 @@ impl Channel {
             Ok(())
         }
     }
-    pub fn drain(&mut self, len: usize) -> Vec<f32> {
+    pub fn drain_front(&mut self, len: usize) -> Vec<f32> {
         let drained = self.buf.drain(..len);
         self.buf.fill_back(0.0);
         drained
     }
-    pub fn drain_to_channel(&mut self, len: usize) -> Channel {
-        Self::from_buf(RingBuffer::from(self.drain(len)))
+    pub fn drain_front_to_channel(&mut self, len: usize) -> Channel {
+        Self::from_buf(RingBuffer::from(self.drain_front(len)))
+    }
+    pub fn drain_back(&mut self, left: usize) -> Vec<f32> {
+        let drained = self.buf.drain(left..);
+        self.buf.fill_front(0.0);
+        drained
+    }
+    pub fn drain_back_to_channel(&mut self, left: usize) -> Channel {
+        Self::from_buf(RingBuffer::from(self.drain_back(left)))
     }
     pub fn init(&mut self, len: usize) {
         self.buf.to_capacity_back(Some(len));
@@ -78,6 +102,7 @@ impl Channel {
     }
 }
 
+#[derive(Clone)]
 pub struct StereoChannel {
     l: Channel,
     r: Channel
@@ -105,7 +130,7 @@ impl StereoChannel {
         Ok(())
     }
     pub fn drain(&mut self, len: usize) -> StereoChannel {
-        StereoChannel::from_channels(self.l.drain_to_channel(len), self.r.drain_to_channel(len))
+        StereoChannel::from_channels(self.l.drain_front_to_channel(len), self.r.drain_front_to_channel(len))
     }
     pub fn init(&mut self, len: usize) {
         self.l.init(len);
@@ -137,6 +162,7 @@ impl StereoChannel {
     }
 }
 
+#[derive(Clone)]
 pub struct RawMixerData {
     channels: Vec<StereoChannel>
 }
@@ -200,8 +226,8 @@ impl RawMixerData {
 }
 
 pub struct DeadRawMixerData {
-    l: BaseDequeImplementation<f32>,
-    r: BaseDequeImplementation<f32>
+    l: SliceRingBuffer<f32>,
+    r: SliceRingBuffer<f32>
 }
 impl From<RawMixerData> for DeadRawMixerData {
     fn from(data: RawMixerData) -> Self {
@@ -209,19 +235,19 @@ impl From<RawMixerData> for DeadRawMixerData {
         DeadRawMixerData { l, r }
     }
 }
-impl From<Channel> for BaseDequeImplementation<f32> {
+impl From<Channel> for SliceRingBuffer<f32> {
     fn from(channel: Channel) -> Self {
         channel.buf.into_deque()
     }
 }
-impl From<StereoChannel> for (BaseDequeImplementation<f32>, BaseDequeImplementation<f32>) {
+impl From<StereoChannel> for (SliceRingBuffer<f32>, SliceRingBuffer<f32>) {
     fn from(value: StereoChannel) -> Self {
         (value.l.into(), value.r.into())
     }
 }
 impl DeadRawMixerData {
     pub fn empty() -> DeadRawMixerData {
-        DeadRawMixerData { l: BaseDequeImplementation::default(), r: BaseDequeImplementation::default() }
+        DeadRawMixerData { l: SliceRingBuffer::default(), r: SliceRingBuffer::default() }
     }
     pub fn len(&self) -> usize {
         self.l.len() // Right should return the same thing
@@ -235,6 +261,9 @@ impl DeadRawMixerData {
         } else {
             None
         }
+    }
+    pub fn drain_n(&mut self, n: usize) -> (slice_ring_buffer::Drain<'_, f32>, slice_ring_buffer::Drain<'_, f32>) {
+        (self.l.drain(..n), self.r.drain(..n))
     }
     pub fn extend(&mut self, other: DeadRawMixerData) {
         self.l.extend(other.l);
@@ -257,7 +286,9 @@ impl EffectsChain {
     pub fn new_static(fx_chain: Vec<Box<dyn StereoFX>>) -> EffectsChain {
         EffectsChain { fx_chain, modulators: HashMap::new() }
     }
-    pub fn compute(&mut self, mut pair: (f64, f64)) -> (f64, f64) {
+    pub fn compute(&mut self, signal: &StereoChannel) -> StereoChannel {
+        let mut signal_hold = None;
+        let mut signal_ref = signal;
         for effect in self.fx_chain.iter_mut() {
             // HANDLE MODULATABLE EFFECTS
             if let Some(modulatable_effect) = effect.is_modulatable() {
@@ -268,9 +299,14 @@ impl EffectsChain {
                 }
             }
             // END
-            pair = effect.compute(pair);
+            signal_hold = Some(effect.compute(signal_ref));
+            signal_ref = signal_hold.as_ref().unwrap(); // Always ok since we just assigned signal_hold to a `Some` value
         }
-        pair
+        if let Some(out) = signal_hold {
+            out
+        } else {
+            signal_ref.clone()
+        }
     }
     pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn StereoFX>> {
         self.fx_chain.iter()
@@ -359,13 +395,9 @@ impl Mixer {
     }
     pub fn add(&mut self, chunk: &RawMixerData) -> Result<(), MixerError> {
         for (i, (internal, source)) in self.internal_buffer.channels.iter_mut().zip(chunk.channels.iter()).enumerate() {
-            for ((&l, &r), (internal_l, internal_r)) in source.l.audio_buffer().iter().zip(source.r.audio_buffer())
-            .zip(internal.l.audio_buffer_mut().iter_mut().zip(internal.r.audio_buffer_mut().iter_mut())) {
-                let mut pair = self.latency_compensation_delays[i].compute((l as f64, r as f64));
-                pair = self.fx.get_mut(i).ok_or(MixerError::new(&format!("Failed to process effects for channel number {}! Out of bounds in the effects array.", i)))?.compute(pair);
-                *internal_l += pair.0 as f32;
-                *internal_r += pair.1 as f32;
-            }
+            let mut tmp = self.latency_compensation_delays[i].compute(source);
+            tmp = self.fx.get_mut(i).ok_or(MixerError::new(&format!("Failed to process effects for channel number {}! Out of bounds in the effects array.", i)))?.compute(&tmp);
+            internal.add(&tmp, None);
         }
         Ok(())
     }
@@ -397,11 +429,11 @@ impl<T: StereoFX> NamedFX<T> {
         NamedFX { name: name.to_owned(), internal_fx }
     }
 }
-impl<T: StereoFX> StereoFilter for NamedFX<T> {
+impl<T: StereoFX> SoundProcessor for NamedFX<T> {
     fn clear(&mut self) {
         self.internal_fx.lock().unwrap().clear()
     }
-    fn compute(&mut self, signal: (f64, f64)) -> (f64, f64) {
+    fn compute(&mut self, signal: &StereoChannel) -> StereoChannel {
         self.internal_fx.lock().unwrap().compute(signal)
     }
 }
@@ -435,38 +467,35 @@ pub trait IsModulatable {
         None
     }
 }
-pub trait StereoFX: StereoFilter + FX + IsModulatable + Send {  }
-impl<T> StereoFX for T where T: StereoFilter + FX + IsModulatable + Send {  }
+pub trait StereoFX: SoundProcessor + FX + IsModulatable + Send {  }
+impl<T> StereoFX for T where T: SoundProcessor + FX + IsModulatable + Send {  }
 
 pub struct Delay {
-    out: RingBuffer<f64>,
+    buffer: SliceRingBuffer<f32>,
     delay: usize
 }
 impl Delay {
     pub fn new(delay: usize) -> Delay {
         Delay {
-            out: RingBuffer::new(delay).initialize(0.0),
+            buffer: SliceRingBuffer::from_iter((0..delay).map(|_| 0.0)),
             delay
         }
     }
     pub fn resize(&mut self, new_delay: usize) {
-        self.out.to_capacity_front(Some(new_delay));
-        self.out.fill_front(0.0);
+        if new_delay != self.delay {
+            self.buffer.splice(0..(self.delay as i64 - new_delay as i64).max(0) as usize,
+                (0..(new_delay as i64 - self.delay as i64).max(0) as usize).map(|_| 0.0));
+        }
         self.delay = new_delay;
     }
 }
-impl Filter for Delay {
+impl MonoSoundProcessor for Delay {
     fn clear(&mut self) {
-        self.out.initialize_again(0.0);
+        self.buffer = SliceRingBuffer::from_iter((0..self.delay).map(|_| 0.0));
     }
-    fn compute(&mut self, signal: f64) -> f64 {
-        if self.delay != 0 {
-            let buffered_signal = self.out.pop_front().unwrap();
-            self.out.push_back(signal);
-            buffered_signal
-        } else {
-            signal
-        }
+    fn compute(&mut self, signal: &Channel) -> Channel {
+        self.buffer.extend_from_slice(signal.audio_buffer());
+        self.buffer.drain(..signal.len()).collect::<Vec<f32>>().into()
     }
 }
 impl FX for Delay {
@@ -499,13 +528,13 @@ impl StereoDelay {
         self.r.resize(new_delay);
     }
 }
-impl StereoFilter for StereoDelay {
+impl SoundProcessor for StereoDelay {
     fn clear(&mut self) {
         self.l.clear();
         self.r.clear();
     }
-    fn compute(&mut self, signal: (f64, f64)) -> (f64, f64) {
-        (self.l.compute(signal.0), self.r.compute(signal.1))
+    fn compute(&mut self, signal: &StereoChannel) -> StereoChannel {
+        StereoChannel::from_channels(self.l.compute(&signal.l), self.r.compute(&signal.r))
     }
 }
 impl FX for StereoDelay {
@@ -517,34 +546,6 @@ impl FX for StereoDelay {
     }
 }
 impl IsModulatable for StereoDelay {  }
-
-impl FX for FFTConvolution {
-    fn get_latency_samples(&self) -> usize {
-        self.window_size()
-    }
-    fn get_tail_samples(&self) -> usize {
-        self.internal_buffer_size() - self.window_size()
-    }
-}
-impl IsModulatable for FFTConvolution {  }
-impl FX for StereoFFTConvolution {
-    fn get_latency_samples(&self) -> usize {
-        self.window_size()
-    }
-    fn get_tail_samples(&self) -> usize {
-        self.internal_buffer_size() - self.window_size()
-    }
-}
-impl IsModulatable for StereoFFTConvolution {  }
-impl FX for TrueStereoFFTConvolution {
-    fn get_latency_samples(&self) -> usize {
-        self.window_size()
-    }
-    fn get_tail_samples(&self) -> usize {
-        self.internal_buffer_size() - self.window_size()
-    }
-}
-impl IsModulatable for TrueStereoFFTConvolution {  }
 
 pub mod vst2;
 

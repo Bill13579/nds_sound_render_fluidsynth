@@ -76,8 +76,9 @@ impl AudioSystem {
         &mut self.sound_sources
     }
     /// Refill buffers
-    fn refill_buffers(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn refill_buffers(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
         let mut results = Vec::with_capacity(self.sound_sources.len());
+        let mut min_buffer_size = self.sound_sources.values().next().map(|(x, _)| x.len()).unwrap_or(0);
         self.sound_sources.retain(|_, (buf, sound_source)| {
             if buf.is_empty() {
                 if let Some(sound_source_unwrap) = sound_source {
@@ -87,50 +88,50 @@ impl AudioSystem {
                     if is_playback_finished {
                         *sound_source = None;
                     }
+                    if buf.len() < min_buffer_size {
+                        min_buffer_size = buf.len();
+                    }
                     return true;
                 } else {
                     return false;
                 }
             } else {
+                if buf.len() < min_buffer_size {
+                    min_buffer_size = buf.len();
+                }
                 return true;
             }
         });
         results.into_iter().try_for_each(|x| x)?;
-        Ok(())
+        Ok(min_buffer_size)
     }
-    /// Gather a sample from all the buffers
-    fn gather(&mut self) -> ((f32, f32), bool) {
-        self.sound_sources.values_mut().fold(((0.0, 0.0), false), |acc, (store, _)| {
-            let ((total_l, total_r), mut needs_refill) = acc;
-            if let Some((l, r)) = store.drain() {
-                if store.is_empty() {
-                    needs_refill = true;
-                }
-                ((total_l + l, total_r + r), needs_refill)
-            } else {
-                panic!("Unreachable as once a store is determined to have been cleared fully, `refill_buffers` should be automatically called.");
-            }
-        })
-    }
-    pub fn run(&mut self, data: &mut [f32]) -> Result<(), Box<dyn std::error::Error>> {
-        self.refill_buffers()?;
-
-        for pair in data.chunks_mut(2) {
-            if pair.len() == 1 { return Err(Box::new(AudioSystemError::new("TinyAudio has sent an odd length buffer! Stereo audio must have an even length buffer."))); }
-            let ((mut l, mut r), needs_refill) = self.gather();
-            // HANDLE BITDEPTH REDUCTION
-            if self.bitdepth != 0 {
-                l = quantize_to_bitdepth(l, self.bitdepth);
-                r = quantize_to_bitdepth(r, self.bitdepth);
-            }
-            // END
-            pair[0] = l;
-            pair[1] = r;
-            if needs_refill {
-                self.refill_buffers()?;
+    /// Gather samples from all the buffers
+    fn gather_and_interweave(&mut self, n: usize) -> Vec<f32> {
+        let mut out: Vec<f32> = vec![0.0; n * 2];
+        for (part, _) in self.sound_sources.values_mut() {
+            let (part_l, part_r) = part.drain_n(n);
+            for (stereo_pair, (pl, pr)) in out.chunks_mut(2).zip(part_l.zip(part_r)) {
+                stereo_pair[0] += pl;
+                stereo_pair[1] += pr;
             }
         }
+        out
+    }
+    pub fn run(&mut self, data: &mut [f32]) -> Result<(), Box<dyn std::error::Error>> {
+        let mut data_len = data.len() / 2;
+        let mut min_buffer_size = self.refill_buffers()?;
+        if min_buffer_size == 0 { return Ok(()); } // All sound sources have been exhausted, the remaining space in the data buffer can be left empty
+        while data_len != 0 {
+            let chunk_len = data_len.min(min_buffer_size);
+            let chunk = self.gather_and_interweave(chunk_len);
 
+            let left = data.len() - data_len * 2;
+            (&mut data[left..(left + chunk_len * 2)]).copy_from_slice(&chunk);
+
+            data_len -= chunk_len;
+            min_buffer_size = self.refill_buffers()?;
+            if min_buffer_size == 0 { return Ok(()); } // All sound sources have been exhausted, the remaining space in the data buffer can be left empty
+        }
         Ok(())
     }
 }

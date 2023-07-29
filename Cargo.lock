@@ -427,6 +427,7 @@ dependencies = [
  "hound",
  "indexmap",
  "lazy_static",
+ "slice-ring-buffer",
  "tinyaudio",
  "vst",
 ]

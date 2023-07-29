@@ -14,6 +14,7 @@ fft_sound_convolution = { version = "0.1.8", features = ["slice-ring-buffer"] }
 indexmap = "2.0.0"
 vst = "0.4.0"
 lazy_static = "1.4.0"
+slice-ring-buffer = "0.3.2"
 
 [build-dependencies]
 bindgen = "0.66.1"
